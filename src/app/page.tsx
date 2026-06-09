@@ -1,65 +1,1287 @@
-import Image from "next/image";
+'use client';
+
+import { useEffect, useState, useMemo, Fragment } from 'react';
+import { supabase } from '@/lib/supabaseClient';
+import { 
+  BarChart3, 
+  Users, 
+  DollarSign, 
+  MousePointerClick, 
+  Activity, 
+  Search, 
+  RefreshCw, 
+  Calendar,
+  ChevronDown,
+  ChevronRight,
+  Folder,
+  Tag,
+  Megaphone,
+  AlertCircle,
+  Sun,
+  Moon,
+  ChevronsUpDown,
+  ChevronUp,
+  Maximize2,
+  Minimize2
+} from 'lucide-react';
+import { format, subDays, parseISO, subMonths, startOfMonth, endOfMonth, addDays, differenceInDays } from 'date-fns';
+
+const metricLabelMap: Record<string, string> = {
+  imp_cnt: '노출수',
+  clk_cnt: '클릭수',
+  ctr: '클릭률',
+  cpc: '평균CPC',
+  sales_amt: '총비용',
+  purchase_ccnt: '전환수',
+  purchase_conv_amt: '전환매출액',
+  purchase_ror: 'ROAS',
+  cp_conv: '전환당비용'
+};
+
+const metricColorMap: Record<string, { hex: string, bg: string, border: string, text: string }> = {
+  imp_cnt: { hex: '#3b82f6', bg: 'bg-blue-500/10', border: 'border-blue-500/30', text: 'text-blue-400' },
+  clk_cnt: { hex: '#10b981', bg: 'bg-emerald-500/10', border: 'border-emerald-500/30', text: 'text-emerald-400' },
+  ctr: { hex: '#06b6d4', bg: 'bg-cyan-500/10', border: 'border-cyan-500/30', text: 'text-cyan-400' },
+  cpc: { hex: '#f59e0b', bg: 'bg-amber-500/10', border: 'border-amber-500/30', text: 'text-amber-400' },
+  sales_amt: { hex: '#f43f5e', bg: 'bg-rose-500/10', border: 'border-rose-500/30', text: 'text-rose-400' },
+  purchase_ccnt: { hex: '#f97316', bg: 'bg-orange-500/10', border: 'border-orange-500/30', text: 'text-orange-400' },
+  purchase_conv_amt: { hex: '#8b5cf6', bg: 'bg-violet-500/10', border: 'border-violet-500/30', text: 'text-violet-400' },
+  purchase_ror: { hex: '#ec4899', bg: 'bg-pink-500/10', border: 'border-pink-500/30', text: 'text-pink-400' },
+  cp_conv: { hex: '#6366f1', bg: 'bg-indigo-500/10', border: 'border-indigo-500/30', text: 'text-indigo-400' }
+};
+
+const getMetricIcon = (m: string) => {
+  switch (m) {
+    case 'imp_cnt': return <Activity size={15} className="text-blue-500" />;
+    case 'clk_cnt': return <MousePointerClick size={15} className="text-emerald-500" />;
+    case 'ctr': return <Activity size={15} className="text-cyan-500" />;
+    case 'cpc': return <DollarSign size={15} className="text-amber-500" />;
+    case 'sales_amt': return <DollarSign size={15} className="text-rose-500" />;
+    case 'purchase_ccnt': return <Users size={15} className="text-orange-500" />;
+    case 'purchase_conv_amt': return <BarChart3 size={15} className="text-indigo-500" />;
+    case 'purchase_ror': return <BarChart3 size={15} className="text-pink-500" />;
+    case 'cp_conv': return <DollarSign size={15} className="text-indigo-500" />;
+    default: return <Activity size={15} className="text-blue-500" />;
+  }
+};
+
+const formatMetricValue = (key: string, value: number) => {
+  if (key === 'ctr' || key === 'purchase_ror') {
+    return `${value.toFixed(2)}%`;
+  }
+  if (key === 'cpc' || key === 'sales_amt' || key === 'purchase_conv_amt' || key === 'cp_conv') {
+    return `${Math.round(value).toLocaleString()}원`;
+  }
+  return Math.round(value).toLocaleString();
+};
 
 export default function Home() {
+  const [accounts, setAccounts] = useState<any[]>([]);
+  const [selectedAccount, setSelectedAccount] = useState<any | null>(null);
+  
+  // Raw data from database
+  const [rawCampaigns, setRawCampaigns] = useState<any[]>([]);
+  const [rawAdgroups, setRawAdgroups] = useState<any[]>([]);
+  const [rawAds, setRawAds] = useState<any[]>([]);
+  const [rawKeywords, setRawKeywords] = useState<any[]>([]);
+  
+  const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [dbError, setDbError] = useState<string | null>(null);
+  
+  // Custom theme selector ('dark' | 'light')
+  const [theme, setTheme] = useState<'light' | 'dark'>('dark');
+
+  // Selected date preset code
+  const [selectedPreset, setSelectedPreset] = useState<string>('7days');
+  
+  // Date Range Selection (Default to last 7 days)
+  const [startDate, setStartDate] = useState(format(subDays(new Date(), 7), 'yyyy-MM-dd'));
+  const [endDate, setEndDate] = useState(format(subDays(new Date(), 1), 'yyyy-MM-dd'));
+
+  // Table expansion state
+  const [expandedCampaigns, setExpandedCampaigns] = useState<Record<string, boolean>>({});
+  const [expandedAdgroups, setExpandedAdgroups] = useState<Record<string, boolean>>({});
+
+  // Tree Table Sorting State
+  const [sortField, setSortField] = useState<string | null>(null);
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
+
+  // Summary Card selected metrics
+  const [card1Metric, setCard1Metric] = useState<string>('imp_cnt');
+  const [card2Metric, setCard2Metric] = useState<string>('clk_cnt');
+  const [card3Metric, setCard3Metric] = useState<string>('sales_amt');
+  const [card4Metric, setCard4Metric] = useState<string>('purchase_conv_amt');
+
+  // Chart Plotted Multiple Metrics State
+  const [selectedChartMetrics, setSelectedChartMetrics] = useState<string[]>(['sales_amt']);
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
+
+  // 1. Load accounts
+  useEffect(() => {
+    async function loadAccounts() {
+      const { data, error } = await supabase.from('ad_accounts').select('*').order('ad_account_name');
+      if (data) {
+        setAccounts(data);
+        if (data.length > 0) setSelectedAccount(data[0]);
+      }
+      setLoading(false);
+    }
+    loadAccounts();
+  }, []);
+
+  // Filter accounts by search query
+  const filteredAccounts = useMemo(() => {
+    return accounts.filter(acc => acc.ad_account_name.toLowerCase().includes(searchQuery.toLowerCase()));
+  }, [accounts, searchQuery]);
+
+  // 2. Load hierarchy and stats when account is selected
+  async function loadData() {
+    if (!selectedAccount) return;
+    setLoading(true);
+    setDbError(null);
+    
+    // Fetch Campaigns
+    const { data: camps, error: campErr } = await supabase
+      .from('campaigns')
+      .select(`
+        ncc_campaign_id, name, status,
+        campaign_stats (
+          stat_date, imp_cnt, clk_cnt, ctr, cpc, sales_amt, purchase_ccnt, purchase_conv_amt, purchase_ror, cp_conv
+        )
+      `)
+      .eq('customer_id', selectedAccount.customer_id)
+      .order('name');
+
+    // Fetch Ad Groups
+    const { data: adgs, error: adgErr } = await supabase
+      .from('ad_groups')
+      .select(`
+        ncc_adgroup_id, ncc_campaign_id, name, status,
+        ad_group_stats (
+          stat_date, imp_cnt, clk_cnt, ctr, cpc, sales_amt, purchase_ccnt, purchase_conv_amt, purchase_ror, cp_conv
+        )
+      `)
+      .eq('customer_id', selectedAccount.customer_id)
+      .order('name');
+
+    // Fetch Ads (Creatives)
+    const { data: adsList, error: adsErr } = await supabase
+      .from('ads')
+      .select(`
+        ncc_ad_id, ncc_adgroup_id, ncc_campaign_id, name, type, image_url, status,
+        ad_stats (
+          stat_date, imp_cnt, clk_cnt, ctr, cpc, sales_amt, purchase_ccnt, purchase_conv_amt, purchase_ror, cp_conv
+        )
+      `)
+      .eq('customer_id', selectedAccount.customer_id)
+      .order('name');
+
+    // Fetch Keywords
+    const { data: keywordsList, error: kwErr } = await supabase
+      .from('keywords')
+      .select(`
+        ncc_keyword_id, ncc_adgroup_id, ncc_campaign_id, keyword, status,
+        keyword_stats (
+          stat_date, imp_cnt, clk_cnt, ctr, cpc, sales_amt, purchase_ccnt, purchase_conv_amt, purchase_ror, cp_conv
+        )
+      `)
+      .eq('customer_id', selectedAccount.customer_id)
+      .order('keyword');
+
+    // Check if tables are missing in the schema
+    let schemaMissing = false;
+    if (campErr && campErr.message.includes("Could not find the table")) schemaMissing = true;
+    if (adgErr && adgErr.message.includes("Could not find the table")) schemaMissing = true;
+    if (adsErr && adsErr.message.includes("Could not find the table")) schemaMissing = true;
+    if (kwErr && kwErr.message.includes("Could not find the table")) schemaMissing = true;
+
+    if (schemaMissing) {
+      setDbError("Supabase 데이터베이스에 광고그룹(`ad_groups`), 소재(`ads`), 키워드(`keywords`) 테이블이 구성되지 않았습니다. 동기화를 시작하기 전에 supabase_schema.sql 스크립트를 Supabase SQL Editor에서 실행하고 'NOTIFY pgrst, 'reload schema';' 명령어로 스키마 캐시를 갱신해 주세요.");
+    }
+
+    setRawCampaigns(camps || []);
+    setRawAdgroups(adgs || []);
+    setRawAds(adsList || []);
+    setRawKeywords(keywordsList || []);
+    setLoading(false);
+  }
+
+  useEffect(() => {
+    loadData();
+  }, [selectedAccount]);
+
+  // Expand campaigns by default once data is loaded to make it easy for user
+  useEffect(() => {
+    if (rawCampaigns.length > 0) {
+      const exp: Record<string, boolean> = {};
+      rawCampaigns.forEach(c => {
+        exp[c.ncc_campaign_id] = true;
+      });
+      setExpandedCampaigns(exp);
+    }
+  }, [rawCampaigns]);
+
+  useEffect(() => {
+    if (rawAdgroups.length > 0) {
+      const exp: Record<string, boolean> = {};
+      rawAdgroups.forEach(ag => {
+        exp[ag.ncc_adgroup_id] = true;
+      });
+      setExpandedAdgroups(exp);
+    }
+  }, [rawAdgroups]);
+
+  // Expand / Collapse all fields controls
+  const handleExpandAll = () => {
+    const nextCampaigns: Record<string, boolean> = {};
+    const nextAdgroups: Record<string, boolean> = {};
+    
+    rawCampaigns.forEach(c => {
+      nextCampaigns[c.ncc_campaign_id] = true;
+    });
+    rawAdgroups.forEach(ag => {
+      nextAdgroups[ag.ncc_adgroup_id] = true;
+    });
+    
+    setExpandedCampaigns(nextCampaigns);
+    setExpandedAdgroups(nextAdgroups);
+  };
+
+  const handleCollapseAll = () => {
+    setExpandedCampaigns({});
+    setExpandedAdgroups({});
+  };
+
+  // 3. Client-side Statistics Aggregator
+  const aggregateStats = (statsList: any[]) => {
+    const aggregated = statsList.reduce((acc, curr) => {
+      const statDate = curr.stat_date;
+      if (statDate >= startDate && statDate <= endDate) {
+        acc.imp_cnt += (curr.imp_cnt || 0);
+        acc.clk_cnt += (curr.clk_cnt || 0);
+        acc.sales_amt += (curr.sales_amt || 0);
+        acc.purchase_ccnt += (curr.purchase_ccnt || 0);
+        acc.purchase_conv_amt += (curr.purchase_conv_amt || 0);
+      }
+      return acc;
+    }, { imp_cnt: 0, clk_cnt: 0, sales_amt: 0, purchase_ccnt: 0, purchase_conv_amt: 0 });
+
+    const ctr = aggregated.imp_cnt > 0 ? (aggregated.clk_cnt / aggregated.imp_cnt) * 100 : 0;
+    const cpc = aggregated.clk_cnt > 0 ? Math.round(aggregated.sales_amt / aggregated.clk_cnt) : 0;
+    const purchase_ror = aggregated.sales_amt > 0 ? (aggregated.purchase_conv_amt / aggregated.sales_amt) * 100 : 0;
+    const cp_conv = aggregated.purchase_ccnt > 0 ? Math.round(aggregated.sales_amt / aggregated.purchase_ccnt) : 0;
+
+    return {
+      ...aggregated,
+      ctr,
+      cpc,
+      purchase_ror,
+      cp_conv
+    };
+  };
+
+  // Compile final hierarchy with aggregated data
+  const campaignsData = useMemo(() => {
+    return rawCampaigns.map(camp => ({
+      ...camp,
+      ...aggregateStats(camp.campaign_stats || [])
+    }));
+  }, [rawCampaigns, startDate, endDate]);
+
+  const adgroupsData = useMemo(() => {
+    return rawAdgroups.map(adg => ({
+      ...adg,
+      ...aggregateStats(adg.ad_group_stats || [])
+    }));
+  }, [rawAdgroups, startDate, endDate]);
+
+  const adsData = useMemo(() => {
+    return rawAds.map(ad => ({
+      ...ad,
+      ...aggregateStats(ad.ad_stats || [])
+    }));
+  }, [rawAds, startDate, endDate]);
+
+  const keywordsData = useMemo(() => {
+    return rawKeywords.map(kw => ({
+      ...kw,
+      name: kw.keyword,
+      isKeyword: true,
+      ...aggregateStats(kw.keyword_stats || [])
+    }));
+  }, [rawKeywords, startDate, endDate]);
+
+  // 4. Sorting logic at each nested level
+  const handleSort = (field: string) => {
+    if (sortField === field) {
+      setSortOrder(prev => (prev === 'desc' ? 'asc' : 'desc'));
+    } else {
+      setSortField(field);
+      setSortOrder('desc');
+    }
+  };
+
+  const getSortedData = (dataArray: any[]) => {
+    if (!sortField) return dataArray;
+    return [...dataArray].sort((a, b) => {
+      const valA = a[sortField] || 0;
+      const valB = b[sortField] || 0;
+      return sortOrder === 'asc' ? valA - valB : valB - valA;
+    });
+  };
+
+  const sortedCampaigns = useMemo(() => getSortedData(campaignsData), [campaignsData, sortField, sortOrder]);
+  const sortedAdgroups = useMemo(() => getSortedData(adgroupsData), [adgroupsData, sortField, sortOrder]);
+  const sortedAds = useMemo(() => getSortedData(adsData), [adsData, sortField, sortOrder]);
+  const sortedKeywords = useMemo(() => getSortedData(keywordsData), [keywordsData, sortField, sortOrder]);
+
+  // Overall account summary (summed from top-level campaigns)
+  const summary = useMemo(() => {
+    const totals = campaignsData.reduce((acc, curr) => ({
+      imp_cnt: acc.imp_cnt + (curr.imp_cnt || 0),
+      clk_cnt: acc.clk_cnt + (curr.clk_cnt || 0),
+      sales_amt: acc.sales_amt + (curr.sales_amt || 0),
+      purchase_ccnt: acc.purchase_ccnt + (curr.purchase_ccnt || 0),
+      purchase_conv_amt: acc.purchase_conv_amt + (curr.purchase_conv_amt || 0)
+    }), { imp_cnt: 0, clk_cnt: 0, sales_amt: 0, purchase_ccnt: 0, purchase_conv_amt: 0 });
+
+    const ctr = totals.imp_cnt > 0 ? (totals.clk_cnt / totals.imp_cnt) * 100 : 0;
+    const cpc = totals.clk_cnt > 0 ? Math.round(totals.sales_amt / totals.clk_cnt) : 0;
+    const purchase_ror = totals.sales_amt > 0 ? (totals.purchase_conv_amt / totals.sales_amt) * 100 : 0;
+    const cp_conv = totals.purchase_ccnt > 0 ? Math.round(totals.sales_amt / totals.purchase_ccnt) : 0;
+
+    return {
+      ...totals,
+      ctr,
+      cpc,
+      purchase_ror,
+      cp_conv
+    };
+  }, [campaignsData]);
+
+  // 5. Daily Trend Graph Data Aggregation
+  const dailyChartData = useMemo(() => {
+    const dateMap: Record<string, any> = {};
+    const start = parseISO(startDate);
+    const end = parseISO(endDate);
+    const totalDays = differenceInDays(end, start);
+    
+    // Seed all dates with empty statistics
+    for (let d = 0; d <= totalDays; d++) {
+      const dateStr = format(addDays(start, d), 'yyyy-MM-dd');
+      dateMap[dateStr] = {
+        dateStr,
+        dateLabel: format(addDays(start, d), 'MM-dd'),
+        imp_cnt: 0,
+        clk_cnt: 0,
+        sales_amt: 0,
+        purchase_ccnt: 0,
+        purchase_conv_amt: 0
+      };
+    }
+
+    // Accumulate campaign stats
+    rawCampaigns.forEach(camp => {
+      (camp.campaign_stats || []).forEach((stat: any) => {
+        const dateStr = stat.stat_date;
+        if (dateMap[dateStr]) {
+          dateMap[dateStr].imp_cnt += (stat.imp_cnt || 0);
+          dateMap[dateStr].clk_cnt += (stat.clk_cnt || 0);
+          dateMap[dateStr].sales_amt += (stat.sales_amt || 0);
+          dateMap[dateStr].purchase_ccnt += (stat.purchase_ccnt || 0);
+          dateMap[dateStr].purchase_conv_amt += (stat.purchase_conv_amt || 0);
+        }
+      });
+    });
+
+    // Form final arrays and compute ratios
+    return Object.values(dateMap)
+      .sort((a: any, b: any) => a.dateStr.localeCompare(b.dateStr))
+      .map((item: any) => {
+        const ctr = item.imp_cnt > 0 ? (item.clk_cnt / item.imp_cnt) * 100 : 0;
+        const cpc = item.clk_cnt > 0 ? Math.round(item.sales_amt / item.clk_cnt) : 0;
+        const purchase_ror = item.sales_amt > 0 ? (item.purchase_conv_amt / item.sales_amt) * 100 : 0;
+        const cp_conv = item.purchase_ccnt > 0 ? Math.round(item.sales_amt / item.purchase_ccnt) : 0;
+        
+        return {
+          ...item,
+          ctr,
+          cpc,
+          purchase_ror,
+          cp_conv
+        };
+      });
+  }, [rawCampaigns, startDate, endDate]);
+
+  // 6. SVG Drawing calculations
+  const svgWidth = 1000;
+  const svgHeight = 180;
+  const paddingLeft = 50;
+  const paddingRight = 20;
+  const paddingTop = 20;
+  const paddingBottom = 25;
+  const plotWidth = svgWidth - paddingLeft - paddingRight;
+  const plotHeight = svgHeight - paddingTop - paddingBottom;
+
+  const multipleChartLines = useMemo(() => {
+    if (dailyChartData.length === 0) return [];
+
+    return selectedChartMetrics.map(metric => {
+      // Find min and max of target metric
+      const values = dailyChartData.map((d: any) => d[metric] || 0);
+      const maxY = Math.max(...values, 1);
+      const minY = 0;
+
+      const points = dailyChartData.map((item: any, idx) => {
+        const val = item[metric] || 0;
+        const x = paddingLeft + (idx / Math.max(dailyChartData.length - 1, 1)) * plotWidth;
+        const y = paddingTop + plotHeight - ((val - minY) / (maxY - minY)) * plotHeight;
+        return { x, y, value: val, date: item.dateStr, label: item.dateLabel };
+      });
+
+      // Create path D
+      const pathD = points.reduce((acc, p, idx) => {
+        return acc + (idx === 0 ? `M ${p.x} ${p.y}` : ` L ${p.x} ${p.y}`);
+      }, '');
+
+      // Create area D
+      const first = points[0];
+      const last = points[points.length - 1];
+      const floorY = paddingTop + plotHeight;
+      const areaD = `${pathD} L ${last.x} ${floorY} L ${first.x} ${floorY} Z`;
+
+      return {
+        metric,
+        points,
+        pathD,
+        areaD,
+        color: metricColorMap[metric]?.hex || '#3b82f6'
+      };
+    });
+  }, [dailyChartData, selectedChartMetrics]);
+
+  const handleMouseMove = (e: React.MouseEvent<SVGSVGElement, MouseEvent>) => {
+    if (multipleChartLines.length === 0 || multipleChartLines[0].points.length === 0) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const mouseX = ((e.clientX - rect.left) / rect.width) * svgWidth;
+    
+    // Find closest point
+    let closestIdx = 0;
+    let minDiff = Infinity;
+    multipleChartLines[0].points.forEach((p, idx) => {
+      const diff = Math.abs(p.x - mouseX);
+      if (diff < minDiff) {
+        minDiff = diff;
+        closestIdx = idx;
+      }
+    });
+
+    setHoveredIndex(closestIdx);
+    
+    // Position tooltip relative to HTML viewport
+    const pt = multipleChartLines[0].points[closestIdx];
+    const tooltipX = rect.left + (pt.x / svgWidth) * rect.width;
+    const tooltipY = rect.top + (pt.y / svgHeight) * rect.height - 55;
+    setTooltipPos({ x: tooltipX, y: tooltipY });
+  };
+
+  const handleMouseLeave = () => {
+    setHoveredIndex(null);
+  };
+
+  // 7. On-Demand Sync for Date Range
+  async function handleSync() {
+    if (!selectedAccount) return;
+    setSyncing(true);
+    try {
+      const res = await fetch(`/api/stats/sync?customerId=${selectedAccount.customer_id}&startDate=${startDate}&endDate=${endDate}`);
+      const result = await res.json();
+      if (result.success) {
+        await loadData();
+      } else {
+        alert('동기화 실패: ' + result.error);
+      }
+    } catch (err) {
+      alert('오류가 발생했습니다.');
+    }
+    setSyncing(false);
+  }
+
+  const toggleCampaign = (id: string) => {
+    setExpandedCampaigns(prev => ({ ...prev, [id]: !prev[id] }));
+  };
+
+  const toggleAdgroup = (id: string) => {
+    setExpandedAdgroups(prev => ({ ...prev, [id]: !prev[id] }));
+  };
+
+  // Preset Date range selection handlers
+  const setPresetRange = (type: 'yesterday' | '7days' | '14days' | '30days' | 'lastMonth' | 'monthBeforeLast') => {
+    setSelectedPreset(type);
+    const today = new Date();
+    if (type === 'yesterday') {
+      const yesterday = format(subDays(today, 1), 'yyyy-MM-dd');
+      setStartDate(yesterday);
+      setEndDate(yesterday);
+    } else if (type === '7days') {
+      setStartDate(format(subDays(today, 7), 'yyyy-MM-dd'));
+      setEndDate(format(subDays(today, 1), 'yyyy-MM-dd'));
+    } else if (type === '14days') {
+      setStartDate(format(subDays(today, 14), 'yyyy-MM-dd'));
+      setEndDate(format(subDays(today, 1), 'yyyy-MM-dd'));
+    } else if (type === '30days') {
+      setStartDate(format(subDays(today, 30), 'yyyy-MM-dd'));
+      setEndDate(format(subDays(today, 1), 'yyyy-MM-dd'));
+    } else if (type === 'lastMonth') {
+      const lastMonthDate = subMonths(today, 1);
+      setStartDate(format(startOfMonth(lastMonthDate), 'yyyy-MM-dd'));
+      setEndDate(format(endOfMonth(lastMonthDate), 'yyyy-MM-dd'));
+    } else if (type === 'monthBeforeLast') {
+      const monthBeforeLastDate = subMonths(today, 2);
+      setStartDate(format(startOfMonth(monthBeforeLastDate), 'yyyy-MM-dd'));
+      setEndDate(format(endOfMonth(monthBeforeLastDate), 'yyyy-MM-dd'));
+    }
+  };
+
+  // Removed metricLabelMap, metricColorMap, and getMetricIcon (moved to module scope)
+
+  const toggleChartMetric = (m: string) => {
+    setSelectedChartMetrics(prev => {
+      if (prev.includes(m)) {
+        if (prev.length === 1) return prev;
+        return prev.filter(x => x !== m);
+      } else {
+        return [...prev, m];
+      }
+    });
+  };
+
+  // Removed formatMetricValue (moved to module scope)
+
+  // Clickable Header Helper
+  const SortableHeader = ({ field, label, widthClass, textRight }: { field: string, label: string, widthClass: string, textRight?: boolean }) => {
+    const isSorted = sortField === field;
+    return (
+      <th 
+        onClick={() => handleSort(field)}
+        className={`px-2 py-3 hover:bg-neutral-800/50 hover:text-white cursor-pointer select-none transition-colors border-r border-neutral-900/10 ${widthClass} ${textRight ? 'text-right' : ''}`}
+      >
+        <div className={`flex items-center gap-1 ${textRight ? 'justify-end' : ''}`}>
+          <span>{label}</span>
+          <span className="text-[9px] text-neutral-500">
+            {isSorted ? (sortOrder === 'asc' ? '▲' : '▼') : <ChevronsUpDown size={9} />}
+          </span>
+        </div>
+      </th>
+    );
+  };
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <div className={`flex h-screen overflow-hidden text-xs antialiased font-sans transition-colors duration-300 ${
+      theme === 'dark' ? 'bg-neutral-900 text-neutral-100 dark' : 'bg-gray-50 text-neutral-800'
+    }`}>
+      
+      {/* Sidebar */}
+      <div className={`w-60 border-r flex flex-col flex-shrink-0 transition-colors duration-300 ${
+        theme === 'dark' ? 'bg-neutral-950 border-neutral-800' : 'bg-white border-gray-200'
+      }`}>
+        <div className={`p-5 border-b ${theme === 'dark' ? 'border-neutral-800' : 'border-gray-150'}`}>
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center shadow-lg shadow-blue-500/20">
+              <BarChart3 className="text-white" size={15} />
+            </div>
+            <div>
+              <div className={`font-bold text-xs leading-tight ${theme === 'dark' ? 'text-white' : 'text-neutral-900'}`}>NAV AD</div>
+              <div className="text-[9px] text-neutral-500 font-bold tracking-wider uppercase">PERFORMANCE DASH</div>
+            </div>
+          </div>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
+        
+        {/* Search Input */}
+        <div className="p-3">
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-neutral-500" size={12} />
+            <input 
+              type="text" 
+              placeholder="광고주 검색..." 
+              className={`w-full pl-8 pr-3 py-1.5 border rounded-lg outline-none text-xs transition-all ${
+                theme === 'dark' 
+                  ? 'bg-neutral-900 border-neutral-850 focus:border-blue-500 text-neutral-200' 
+                  : 'bg-gray-100 border-gray-200 focus:border-blue-500 text-neutral-800'
+              }`}
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+          </div>
         </div>
-      </main>
+
+        {/* Advertiser List */}
+        <div className="overflow-y-auto flex-1 p-2 space-y-0.5 custom-scrollbar">
+          {filteredAccounts.length === 0 && !loading && (
+            <p className="text-neutral-500 p-2 text-center text-[10px]">결과가 없습니다.</p>
+          )}
+          {filteredAccounts.map(acc => {
+            const isSelected = selectedAccount?.customer_id === acc.customer_id;
+            return (
+              <button
+                key={acc.customer_id}
+                onClick={() => setSelectedAccount(acc)}
+                className={`w-full text-left px-3 py-2 rounded-lg transition-all flex items-center gap-2.5 relative group border text-[11px] ${
+                  isSelected
+                    ? theme === 'dark'
+                      ? 'bg-blue-600/15 text-blue-400 font-semibold border-blue-500/30'
+                      : 'bg-blue-50 text-blue-600 font-semibold border-blue-200'
+                    : theme === 'dark'
+                      ? 'hover:bg-neutral-900 text-neutral-400 hover:text-neutral-200 border-transparent'
+                      : 'hover:bg-gray-100 text-neutral-600 hover:text-neutral-900 border-transparent'
+                }`}
+              >
+                {isSelected && (
+                  <div className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-4 bg-blue-500 rounded-r-md"></div>
+                )}
+                <Users size={12} className={isSelected ? "text-blue-500" : "text-neutral-500"} />
+                <span className="truncate">{acc.ad_account_name}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Main Content */}
+      <div className="flex-1 overflow-y-auto flex flex-col">
+        <div className="max-w-7xl w-full mx-auto p-5 xl:p-6 space-y-5 flex-1">
+          
+          {/* DB Schema Error Warning Alert */}
+          {dbError && (
+            <div className="flex items-start gap-3 p-3 bg-red-950/10 border border-red-900/30 rounded-xl text-red-400 animate-pulse text-[11px]">
+              <AlertCircle className="flex-shrink-0 mt-0.5" size={14} />
+              <div>
+                <p className="font-semibold text-red-300">데이터베이스 설정 오류</p>
+                <p className="mt-0.5 text-neutral-400">{dbError}</p>
+              </div>
+            </div>
+          )}
+
+          {/* Header Controls */}
+          <header className="flex flex-col xl:flex-row justify-between items-start xl:items-end gap-3 pb-1">
+            <div>
+              <h1 className={`text-xl font-bold tracking-tight ${theme === 'dark' ? 'text-white' : 'text-neutral-900'}`}>
+                {selectedAccount ? selectedAccount.ad_account_name : '광고주를 선택해주세요'}
+              </h1>
+              <p className="text-neutral-500 text-[10px] font-semibold">실시간 마케팅 대시보드</p>
+            </div>
+            
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Date Presets (Pill tabs) */}
+              <div className={`flex rounded-lg p-0.5 text-[10px] font-semibold border ${
+                theme === 'dark' ? 'bg-neutral-950 border-neutral-800' : 'bg-gray-100 border-gray-200'
+              }`}>
+                {[
+                  { id: 'yesterday', label: '어제' },
+                  { id: '7days', label: '7일' },
+                  { id: '14days', label: '14일' },
+                  { id: '30days', label: '30일' },
+                  { id: 'lastMonth', label: '전월', highlight: true },
+                  { id: 'monthBeforeLast', label: '전전월', highlight: true }
+                ].map(p => {
+                  const isActive = selectedPreset === p.id;
+                  return (
+                    <button
+                      key={p.id}
+                      onClick={() => setPresetRange(p.id as any)}
+                      className={`px-2 py-1 rounded transition-all cursor-pointer ${
+                        isActive
+                          ? theme === 'dark'
+                            ? 'bg-blue-600 text-white font-semibold shadow-md'
+                            : 'bg-white text-blue-600 shadow-sm font-semibold'
+                          : p.highlight 
+                            ? 'text-blue-500 hover:bg-neutral-900/20' 
+                            : 'text-neutral-500 hover:text-neutral-900'
+                      }`}
+                    >
+                      {p.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Date Range Selector */}
+              <div className={`flex items-center rounded-lg px-2 py-0.5 border ${
+                theme === 'dark' ? 'bg-neutral-950 border-neutral-800' : 'bg-white border-gray-200'
+              }`}>
+                <Calendar size={12} className="text-neutral-500 mr-1.5" />
+                <input 
+                  type="date" 
+                  value={startDate}
+                  onChange={(e) => {
+                    setStartDate(e.target.value);
+                    setSelectedPreset('custom');
+                  }}
+                  className={`bg-transparent border-none outline-none py-0.5 cursor-pointer w-22 text-[10px] focus:ring-0 ${
+                    theme === 'dark' ? 'text-neutral-300' : 'text-neutral-700'
+                  }`}
+                />
+                <span className="text-neutral-600 mx-0.5">~</span>
+                <input 
+                  type="date" 
+                  value={endDate}
+                  onChange={(e) => {
+                    setEndDate(e.target.value);
+                    setSelectedPreset('custom');
+                  }}
+                  className={`bg-transparent border-none outline-none py-0.5 cursor-pointer w-22 text-[10px] focus:ring-0 ${
+                    theme === 'dark' ? 'text-neutral-300' : 'text-neutral-700'
+                  }`}
+                />
+              </div>
+
+              {/* Sync Button */}
+              <button 
+                onClick={handleSync}
+                disabled={syncing || !selectedAccount}
+                className="flex items-center gap-1 px-3 py-1 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 disabled:from-blue-800 text-white font-bold rounded-lg shadow-md transition-all text-[10px] cursor-pointer"
+              >
+                <RefreshCw size={10} className={syncing ? "animate-spin" : ""} />
+                {syncing ? '동기화 중' : '동기화'}
+              </button>
+
+              {/* Theme Toggle Button */}
+              <button 
+                onClick={() => setTheme(prev => prev === 'dark' ? 'light' : 'dark')}
+                className={`p-1.5 border rounded-lg transition-colors cursor-pointer ${
+                  theme === 'dark' 
+                    ? 'bg-neutral-950 border-neutral-800 hover:bg-neutral-900 text-amber-400' 
+                    : 'bg-white border-gray-200 hover:bg-gray-100 text-indigo-600'
+                }`}
+                title="다크/라이트 테마 변경"
+              >
+                {theme === 'dark' ? <Sun size={12} /> : <Moon size={12} />}
+              </button>
+            </div>
+          </header>
+
+          {/* Summary Cards */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <SummaryCard 
+              metric={card1Metric} 
+              value={formatMetricValue(card1Metric, summary[card1Metric as keyof typeof summary] || 0)} 
+              icon={getMetricIcon(card1Metric)} 
+              theme={theme} 
+              onMetricChange={setCard1Metric} 
+              metricLabelMap={metricLabelMap} 
+            />
+            <SummaryCard 
+              metric={card2Metric} 
+              value={formatMetricValue(card2Metric, summary[card2Metric as keyof typeof summary] || 0)} 
+              icon={getMetricIcon(card2Metric)} 
+              theme={theme} 
+              onMetricChange={setCard2Metric} 
+              metricLabelMap={metricLabelMap} 
+            />
+            <SummaryCard 
+              metric={card3Metric} 
+              value={formatMetricValue(card3Metric, summary[card3Metric as keyof typeof summary] || 0)} 
+              icon={getMetricIcon(card3Metric)} 
+              theme={theme} 
+              onMetricChange={setCard3Metric} 
+              metricLabelMap={metricLabelMap} 
+            />
+            <SummaryCard 
+              metric={card4Metric} 
+              value={formatMetricValue(card4Metric, summary[card4Metric as keyof typeof summary] || 0)} 
+              icon={getMetricIcon(card4Metric)} 
+              theme={theme} 
+              onMetricChange={setCard4Metric} 
+              metricLabelMap={metricLabelMap} 
+            />
+          </div>
+
+          {/* Dynamic Interactive SVG Trend Graph */}
+          <div className={`p-4 rounded-xl border transition-all ${
+            theme === 'dark' ? 'bg-neutral-950 border-neutral-800' : 'bg-white border-gray-200'
+          }`}>
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 mb-3">
+              <div>
+                <div className="font-bold text-neutral-400 text-[11px] uppercase tracking-wide">일자별 광고 데이터 추이 그래프</div>
+                {/* Metric Checkboxes */}
+                <div className="flex flex-wrap gap-1.5 mt-2">
+                  {Object.entries(metricLabelMap).map(([key, label]) => {
+                    const isSelected = selectedChartMetrics.includes(key);
+                    const colors = metricColorMap[key] || { hex: '#3b82f6', bg: 'bg-blue-500/10', border: 'border-blue-500/30', text: 'text-blue-400' };
+                    return (
+                      <button
+                        key={key}
+                        onClick={() => toggleChartMetric(key)}
+                        className={`px-2.5 py-1 rounded-full text-[10px] font-semibold border transition-all cursor-pointer flex items-center gap-1.5 ${
+                          isSelected
+                            ? `${colors.bg} ${colors.border} ${colors.text}`
+                            : theme === 'dark'
+                              ? 'bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-neutral-200'
+                              : 'bg-white border-gray-200 text-neutral-600 hover:text-neutral-800'
+                        }`}
+                      >
+                        <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: colors.hex }}></span>
+                        <span>{label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            {/* SVG Trend Line Graph */}
+            <div className="relative">
+              {dailyChartData.length === 0 ? (
+                <div className="h-32 flex items-center justify-center text-neutral-500">조회된 데이터가 없습니다.</div>
+              ) : (
+                <svg 
+                  viewBox={`0 0 ${svgWidth} ${svgHeight}`}
+                  className="w-full h-[160px] overflow-visible select-none"
+                  onMouseMove={handleMouseMove}
+                  onMouseLeave={handleMouseLeave}
+                >
+                  <defs>
+                    {selectedChartMetrics.map(metric => {
+                      const color = metricColorMap[metric]?.hex || '#3b82f6';
+                      return (
+                        <linearGradient key={metric} id={`grad-${metric}`} x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0%" stopColor={color} stopOpacity="0.2" />
+                          <stop offset="100%" stopColor={color} stopOpacity="0" />
+                        </linearGradient>
+                      );
+                    })}
+                  </defs>
+
+                  {/* Horizontal Grid lines */}
+                  {[0, 0.25, 0.5, 0.75, 1].map((r, i) => {
+                    const y = paddingTop + r * plotHeight;
+                    return (
+                      <line 
+                        key={i} 
+                        x1={paddingLeft} 
+                        y1={y} 
+                        x2={svgWidth - paddingRight} 
+                        y2={y} 
+                        stroke={theme === 'dark' ? '#262626' : '#e5e7eb'} 
+                        strokeWidth="1"
+                        strokeDasharray="3 3"
+                      />
+                    );
+                  })}
+
+                  {/* Connecting Lines & Areas */}
+                  {multipleChartLines.map((line) => (
+                    <g key={line.metric}>
+                      {/* Only draw area if only 1 metric is selected to prevent messy overlapping */}
+                      {selectedChartMetrics.length === 1 && line.areaD && (
+                        <path d={line.areaD} fill={`url(#grad-${line.metric})`} />
+                      )}
+                      {line.pathD && (
+                        <path 
+                          d={line.pathD} 
+                          fill="none" 
+                          stroke={line.color} 
+                          strokeWidth="2.5" 
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      )}
+                    </g>
+                  ))}
+
+                  {/* Data Points */}
+                  {multipleChartLines.map((line) => {
+                    return line.points.map((pt, idx) => (
+                      <circle 
+                        key={`${line.metric}-${idx}`}
+                        cx={pt.x}
+                        cy={pt.y}
+                        r={hoveredIndex === idx ? 5.5 : 2.5}
+                        fill={hoveredIndex === idx ? line.color : theme === 'dark' ? '#171717' : '#ffffff'}
+                        stroke={line.color}
+                        strokeWidth={hoveredIndex === idx ? 2 : 1}
+                        className="transition-all duration-100"
+                      />
+                    ));
+                  })}
+
+                  {/* X Axis Labels */}
+                  {multipleChartLines[0]?.points.map((pt, idx) => {
+                    // Reduce date labels density on wide ranges to avoid overlapping
+                    const density = Math.ceil(multipleChartLines[0].points.length / 12);
+                    if (idx % density !== 0 && idx !== multipleChartLines[0].points.length - 1) return null;
+                    return (
+                      <text
+                        key={idx}
+                        x={pt.x}
+                        y={svgHeight - 5}
+                        textAnchor="middle"
+                        fill="#737373"
+                        fontSize="9"
+                        fontWeight="semibold"
+                      >
+                        {pt.label}
+                      </text>
+                    );
+                  })}
+
+                  {/* Hover tracker line */}
+                  {hoveredIndex !== null && multipleChartLines[0]?.points[hoveredIndex] && (
+                    <line 
+                      x1={multipleChartLines[0].points[hoveredIndex].x}
+                      y1={paddingTop}
+                      x2={multipleChartLines[0].points[hoveredIndex].x}
+                      y2={paddingTop + plotHeight}
+                      stroke={theme === 'dark' ? '#404040' : '#d4d4d4'}
+                      strokeWidth="1"
+                      strokeDasharray="4 4"
+                      opacity="0.8"
+                    />
+                  )}
+                </svg>
+              )}
+
+              {/* Hover Tooltip Overlay */}
+              {hoveredIndex !== null && dailyChartData[hoveredIndex] && (
+                <div 
+                  className={`absolute p-2.5 rounded-lg border shadow-xl flex flex-col pointer-events-none transition-all duration-100 z-10 text-[10px] min-w-[150px] ${
+                    theme === 'dark' 
+                      ? 'bg-neutral-950 border-neutral-850 text-neutral-200' 
+                      : 'bg-white border-gray-200 text-neutral-800'
+                  }`}
+                  style={{
+                    left: `${((multipleChartLines[0]?.points[hoveredIndex]?.x - paddingLeft) / plotWidth) * 80 + 5}%`,
+                    top: `-45px`,
+                  }}
+                >
+                  <div className="font-bold text-neutral-500 mb-1">{dailyChartData[hoveredIndex].dateStr}</div>
+                  <div className="space-y-1">
+                    {selectedChartMetrics.map(metric => {
+                      const colors = metricColorMap[metric] || { hex: '#3b82f6', text: 'text-blue-400' };
+                      const val = dailyChartData[hoveredIndex][metric] || 0;
+                      return (
+                        <div key={metric} className="flex items-center justify-between gap-4">
+                          <span className="font-semibold flex items-center gap-1">
+                            <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: colors.hex }}></span>
+                            <span>{metricLabelMap[metric]}:</span>
+                          </span>
+                          <span className={`font-mono font-bold ${theme === 'dark' ? 'text-white' : 'text-neutral-900'}`}>
+                            {formatMetricValue(metric, val)}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Table Toolbar controls */}
+          <div className="flex justify-between items-center gap-2 pt-2">
+            <div className="font-bold text-neutral-400 tracking-wide uppercase">소재 상세 성과 지표</div>
+            
+            {/* Tree nodes controls */}
+            <div className="flex gap-2">
+              <button 
+                onClick={handleExpandAll}
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[10px] font-semibold transition-all cursor-pointer hover:shadow ${
+                  theme === 'dark' 
+                    ? 'bg-neutral-950 border-neutral-850 hover:bg-neutral-900 text-neutral-300' 
+                    : 'bg-white border-gray-200 hover:bg-gray-50 text-neutral-700'
+                }`}
+              >
+                <Maximize2 size={10} />
+                <span>전체 펼치기</span>
+              </button>
+              
+              <button 
+                onClick={handleCollapseAll}
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[10px] font-semibold transition-all cursor-pointer hover:shadow ${
+                  theme === 'dark' 
+                    ? 'bg-neutral-950 border-neutral-850 hover:bg-neutral-900 text-neutral-300' 
+                    : 'bg-white border-gray-200 hover:bg-gray-50 text-neutral-700'
+                }`}
+              >
+                <Minimize2 size={10} />
+                <span>전체 접기</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Scroll-Free Compact Table */}
+          <div className={`rounded-xl shadow-xl border overflow-hidden ${
+            theme === 'dark' ? 'bg-neutral-950 border-neutral-850' : 'bg-white border-gray-200'
+          }`}>
+            <div className="w-full">
+              <table className="w-full table-layout-fixed border-collapse text-[11px]">
+                <thead>
+                  <tr className={`border-b text-[10px] uppercase tracking-wider font-bold ${
+                    theme === 'dark' ? 'bg-neutral-950 border-neutral-850 text-neutral-500' : 'bg-gray-100 border-gray-200 text-neutral-500'
+                  }`}>
+                    <th className="px-3 py-3 text-left w-[24%] border-r border-neutral-900/10">캠페인/그룹/소재/키워드</th>
+                    <th className="px-2 py-3 text-center w-[7%] border-r border-neutral-900/10">상태</th>
+                    <SortableHeader field="imp_cnt" label="노출수" widthClass="w-[8%]" textRight />
+                    <SortableHeader field="clk_cnt" label="클릭수" widthClass="w-[6%]" textRight />
+                    <SortableHeader field="ctr" label="클릭률" widthClass="w-[6%]" textRight />
+                    <SortableHeader field="cpc" label="평균CPC" widthClass="w-[8%]" textRight />
+                    <SortableHeader field="sales_amt" label="총비용" widthClass="w-[9%]" textRight />
+                    <SortableHeader field="purchase_ccnt" label="전환수" widthClass="w-[7%]" textRight />
+                    <SortableHeader field="purchase_conv_amt" label="전환매출액" widthClass="w-[10%]" textRight />
+                    <SortableHeader field="purchase_ror" label="ROAS" widthClass="w-[7%]" textRight />
+                    <SortableHeader field="cp_conv" label="전환당비용" widthClass="w-[10%]" textRight />
+                  </tr>
+                </thead>
+                <tbody className={`divide-y font-semibold ${
+                  theme === 'dark' ? 'divide-neutral-900/60 text-neutral-300' : 'divide-gray-100 text-neutral-700'
+                }`}>
+                  {sortedCampaigns.length === 0 ? (
+                    <tr>
+                      <td colSpan={11} className="px-6 py-12 text-center text-neutral-500">
+                        표시할 데이터가 없습니다. {dbError && "먼저 데이터베이스를 갱신해 주세요."}
+                      </td>
+                    </tr>
+                  ) : (
+                    sortedCampaigns.map(camp => {
+                      const isCampExpanded = !!expandedCampaigns[camp.ncc_campaign_id];
+                      const childAdgroups = sortedAdgroups.filter(adg => adg.ncc_campaign_id === camp.ncc_campaign_id);
+
+                      return (
+                        <Fragment key={camp.ncc_campaign_id}>
+                          {/* Campaign Row */}
+                          <tr className={`border-b transition-colors ${
+                            theme === 'dark' 
+                              ? 'hover:bg-neutral-900/40 border-neutral-900 text-white font-bold' 
+                              : 'hover:bg-gray-50 border-gray-100 text-neutral-900 font-bold'
+                          }`}>
+                            <td className="px-3 py-2.5">
+                              <div className="flex items-center gap-1.5 min-w-0">
+                                <button 
+                                  onClick={() => toggleCampaign(camp.ncc_campaign_id)}
+                                  className="p-0.5 hover:bg-neutral-800 rounded transition-colors text-neutral-500 hover:text-neutral-300 cursor-pointer flex-shrink-0"
+                                >
+                                  {isCampExpanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+                                </button>
+                                <Megaphone size={12} className="text-blue-500 flex-shrink-0" />
+                                <span className="truncate pr-1" title={camp.name}>{camp.name}</span>
+                              </div>
+                            </td>
+                            <td className="px-2 py-2.5 text-center">
+                              <div className="flex items-center justify-center gap-1">
+                                <span className={`w-1.5 h-1.5 rounded-full ${camp.status === 'ELIGIBLE' ? 'bg-emerald-500 shadow-[0_0_6px_#10b981]' : 'bg-neutral-500'}`}></span>
+                                <span className="text-[10px] text-neutral-500">{camp.status === 'ELIGIBLE' ? '활성' : '중지'}</span>
+                              </div>
+                            </td>
+                            <td className={`px-2 py-2.5 text-right font-mono ${theme === 'dark' ? 'text-white font-extrabold' : 'text-neutral-900 font-extrabold'}`}>{formatMetricValue('imp_cnt', camp.imp_cnt || 0)}</td>
+                            <td className={`px-2 py-2.5 text-right font-mono ${theme === 'dark' ? 'text-white font-extrabold' : 'text-neutral-900 font-extrabold'}`}>{formatMetricValue('clk_cnt', camp.clk_cnt || 0)}</td>
+                            <td className={`px-2 py-2.5 text-right font-mono ${theme === 'dark' ? 'text-white font-extrabold' : 'text-neutral-900 font-extrabold'}`}>{formatMetricValue('ctr', camp.ctr || 0)}</td>
+                            <td className={`px-2 py-2.5 text-right font-mono ${theme === 'dark' ? 'text-white font-extrabold' : 'text-neutral-900 font-extrabold'}`}>{formatMetricValue('cpc', camp.cpc || 0)}</td>
+                            <td className={`px-2 py-2.5 text-right font-mono ${theme === 'dark' ? 'text-white font-extrabold' : 'text-neutral-900 font-extrabold'}`}>{formatMetricValue('sales_amt', camp.sales_amt || 0)}</td>
+                            <td className={`px-2 py-2.5 text-right font-mono ${theme === 'dark' ? 'text-white font-extrabold' : 'text-neutral-900 font-extrabold'}`}>{formatMetricValue('purchase_ccnt', camp.purchase_ccnt || 0)}</td>
+                            <td className={`px-2 py-2.5 text-right font-mono ${theme === 'dark' ? 'text-white font-extrabold' : 'text-neutral-900 font-extrabold'}`}>{formatMetricValue('purchase_conv_amt', camp.purchase_conv_amt || 0)}</td>
+                            <td className={`px-2 py-2.5 text-right font-mono ${theme === 'dark' ? 'text-white font-extrabold' : 'text-neutral-900 font-extrabold'}`}>{formatMetricValue('purchase_ror', camp.purchase_ror || 0)}</td>
+                            <td className={`px-2 py-2.5 text-right font-mono ${theme === 'dark' ? 'text-white font-extrabold' : 'text-neutral-900 font-extrabold'}`}>{formatMetricValue('cp_conv', camp.cp_conv || 0)}</td>
+                          </tr>
+
+                          {/* Ad Groups under Campaign */}
+                          {isCampExpanded && childAdgroups.map(adg => {
+                            const isAdgExpanded = !!expandedAdgroups[adg.ncc_adgroup_id];
+                            const childAds = sortedAds.filter(ad => ad.ncc_adgroup_id === adg.ncc_adgroup_id);
+                            const childKeywords = sortedKeywords.filter(kw => kw.ncc_adgroup_id === adg.ncc_adgroup_id);
+
+                            return (
+                              <Fragment key={adg.ncc_adgroup_id}>
+                                {/* Ad Group Row */}
+                                <tr className={`transition-colors ${
+                                  theme === 'dark' 
+                                    ? 'bg-neutral-900/10 hover:bg-neutral-900/30 text-neutral-200' 
+                                    : 'bg-gray-50/40 hover:bg-gray-50/90 text-neutral-800'
+                                }`}>
+                                  <td className="px-3 py-2 whitespace-nowrap pl-7 relative">
+                                    {/* Visual tree guide line */}
+                                    <div className={`absolute left-4 top-0 bottom-0 border-l ${theme === 'dark' ? 'border-neutral-800' : 'border-gray-250'}`}></div>
+                                    <div className={`absolute left-4 top-1/2 w-2 border-t ${theme === 'dark' ? 'border-neutral-800' : 'border-gray-250'}`}></div>
+                                    
+                                    <div className="flex items-center gap-1.5 min-w-0 pl-1.5">
+                                      <button 
+                                        onClick={() => toggleAdgroup(adg.ncc_adgroup_id)}
+                                        className="p-0.5 hover:bg-neutral-855 rounded transition-colors text-neutral-500 hover:text-neutral-300 cursor-pointer flex-shrink-0"
+                                      >
+                                        {isAdgExpanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+                                      </button>
+                                      <Folder size={11} className="text-amber-500/90 flex-shrink-0" />
+                                      <span className="truncate pr-1" title={adg.name}>{adg.name}</span>
+                                    </div>
+                                  </td>
+                                  <td className="px-2 py-2 text-center">
+                                    <div className="flex items-center justify-center gap-1">
+                                      <span className={`w-1.5 h-1.5 rounded-full ${adg.status === 'ELIGIBLE' ? 'bg-emerald-500/80 shadow-[0_0_4px_#10b981]' : 'bg-neutral-600'}`}></span>
+                                      <span className="text-[10px] text-neutral-500">{adg.status === 'ELIGIBLE' ? '활성' : '중지'}</span>
+                                    </div>
+                                  </td>
+                                  <td className="px-2 py-2 text-right font-mono font-extrabold">{formatMetricValue('imp_cnt', adg.imp_cnt || 0)}</td>
+                                  <td className="px-2 py-2 text-right font-mono font-extrabold">{formatMetricValue('clk_cnt', adg.clk_cnt || 0)}</td>
+                                  <td className="px-2 py-2 text-right font-mono font-extrabold">{formatMetricValue('ctr', adg.ctr || 0)}</td>
+                                  <td className="px-2 py-2 text-right font-mono font-extrabold">{formatMetricValue('cpc', adg.cpc || 0)}</td>
+                                  <td className="px-2 py-2 text-right font-mono font-extrabold">{formatMetricValue('sales_amt', adg.sales_amt || 0)}</td>
+                                  <td className="px-2 py-2 text-right font-mono font-extrabold">{formatMetricValue('purchase_ccnt', adg.purchase_ccnt || 0)}</td>
+                                  <td className="px-2 py-2 text-right font-mono font-extrabold">{formatMetricValue('purchase_conv_amt', adg.purchase_conv_amt || 0)}</td>
+                                  <td className="px-2 py-2 text-right font-mono font-extrabold">{formatMetricValue('purchase_ror', adg.purchase_ror || 0)}</td>
+                                  <td className="px-2 py-2 text-right font-mono font-extrabold">{formatMetricValue('cp_conv', adg.cp_conv || 0)}</td>
+                                </tr>
+
+                                {/* Ads (Creatives) under Ad Group */}
+                                {isAdgExpanded && childAds.map(ad => (
+                                  <tr key={ad.ncc_ad_id} className={`transition-colors text-[10px] ${
+                                    theme === 'dark' 
+                                      ? 'bg-neutral-950/20 hover:bg-neutral-900/10 text-neutral-450' 
+                                      : 'bg-gray-100/20 hover:bg-gray-100/50 text-neutral-500'
+                                  }`}>
+                                    <td className="px-3 py-1.5 whitespace-nowrap pl-11 relative">
+                                      {/* Visual tree guide line double nesting */}
+                                      <div className={`absolute left-4 top-0 bottom-0 border-l ${theme === 'dark' ? 'border-neutral-800' : 'border-gray-250'}`}></div>
+                                      <div className={`absolute left-8 top-0 bottom-0 border-l ${theme === 'dark' ? 'border-neutral-800' : 'border-gray-250'}`}></div>
+                                      <div className={`absolute left-8 top-1/2 w-2 border-t ${theme === 'dark' ? 'border-neutral-800' : 'border-gray-250'}`}></div>
+
+                                      <div className="flex items-center gap-1.5 min-w-0 pl-1.5">
+                                        {ad.image_url ? (
+                                          <img 
+                                            src={ad.image_url} 
+                                            alt={ad.name} 
+                                            className="w-5 h-5 object-cover rounded border border-neutral-800 flex-shrink-0 bg-neutral-900"
+                                            onError={(e) => {
+                                              (e.target as HTMLElement).style.display = 'none';
+                                            }}
+                                          />
+                                        ) : (
+                                          <Tag size={9} className="text-neutral-600 flex-shrink-0" />
+                                        )}
+                                        <span className="truncate pr-1" title={ad.name}>{ad.name}</span>
+                                      </div>
+                                    </td>
+                                    <td className="px-2 py-1.5 text-center">
+                                      <div className="flex items-center justify-center gap-1">
+                                        <span className={`w-1 h-1 rounded-full ${ad.status === 'ELIGIBLE' ? 'bg-emerald-500/60' : 'bg-neutral-700'}`}></span>
+                                        <span className="text-[9px] text-neutral-500">{ad.status === 'ELIGIBLE' ? '활성' : '중지'}</span>
+                                      </div>
+                                    </td>
+                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('imp_cnt', ad.imp_cnt || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('clk_cnt', ad.clk_cnt || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('ctr', ad.ctr || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('cpc', ad.cpc || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('sales_amt', ad.sales_amt || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('purchase_ccnt', ad.purchase_ccnt || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('purchase_conv_amt', ad.purchase_conv_amt || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('purchase_ror', ad.purchase_ror || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('cp_conv', ad.cp_conv || 0)}</td>
+                                  </tr>
+                                ))}
+
+                                {/* Keywords under Ad Group */}
+                                {isAdgExpanded && childKeywords.map(kw => (
+                                  <tr key={kw.ncc_keyword_id} className={`transition-colors text-[10px] ${
+                                    theme === 'dark' 
+                                      ? 'bg-neutral-950/20 hover:bg-neutral-900/10 text-neutral-450' 
+                                      : 'bg-gray-100/20 hover:bg-gray-100/50 text-neutral-500'
+                                  }`}>
+                                    <td className="px-3 py-1.5 whitespace-nowrap pl-11 relative">
+                                      {/* Visual tree guide line double nesting */}
+                                      <div className={`absolute left-4 top-0 bottom-0 border-l ${theme === 'dark' ? 'border-neutral-800' : 'border-gray-250'}`}></div>
+                                      <div className={`absolute left-8 top-0 bottom-0 border-l ${theme === 'dark' ? 'border-neutral-800' : 'border-gray-250'}`}></div>
+                                      <div className={`absolute left-8 top-1/2 w-2 border-t ${theme === 'dark' ? 'border-neutral-800' : 'border-gray-250'}`}></div>
+
+                                      <div className="flex items-center gap-1.5 min-w-0 pl-1.5">
+                                        <Search size={9} className="text-blue-500 flex-shrink-0" />
+                                        <span className="truncate pr-1 text-blue-500 font-semibold" title={kw.keyword}>{kw.keyword}</span>
+                                        <span className={`text-[7px] px-1 rounded flex-shrink-0 ${theme === 'dark' ? 'bg-neutral-800 text-neutral-400' : 'bg-gray-200 text-neutral-600'}`}>키워드</span>
+                                      </div>
+                                    </td>
+                                    <td className="px-2 py-1.5 text-center">
+                                      <div className="flex items-center justify-center gap-1">
+                                        <span className={`w-1 h-1 rounded-full ${kw.status === 'ELIGIBLE' ? 'bg-emerald-500/60' : 'bg-neutral-700'}`}></span>
+                                        <span className="text-[9px] text-neutral-500">{kw.status === 'ELIGIBLE' ? '활성' : '중지'}</span>
+                                      </div>
+                                    </td>
+                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('imp_cnt', kw.imp_cnt || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('clk_cnt', kw.clk_cnt || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('ctr', kw.ctr || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('cpc', kw.cpc || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('sales_amt', kw.sales_amt || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('purchase_ccnt', kw.purchase_ccnt || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('purchase_conv_amt', kw.purchase_conv_amt || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('purchase_ror', kw.purchase_ror || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('cp_conv', kw.cp_conv || 0)}</td>
+                                  </tr>
+                                ))}
+                              </Fragment>
+                            );
+                          })}
+                        </Fragment>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SummaryCard({ 
+  metric, 
+  value, 
+  icon, 
+  theme, 
+  onMetricChange, 
+  metricLabelMap 
+}: { 
+  metric: string, 
+  value: string | number, 
+  icon: React.ReactNode, 
+  theme: 'light' | 'dark', 
+  onMetricChange: (m: string) => void, 
+  metricLabelMap: Record<string, string> 
+}) {
+  return (
+    <div className={`p-4 rounded-xl border flex items-center gap-4 transition-all hover:-translate-y-0.5 hover:shadow-lg duration-300 ${
+      theme === 'dark' 
+        ? 'bg-neutral-950 border-neutral-800 hover:border-neutral-700 text-white' 
+        : 'bg-white border-gray-200 hover:border-gray-300 text-neutral-800'
+    }`}>
+      <div className={`p-2.5 rounded-lg shadow-inner flex-shrink-0 ${
+        theme === 'dark' ? 'bg-neutral-900 border border-neutral-850' : 'bg-gray-50 border border-gray-150'
+      }`}>
+        {icon}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1 mb-0.5">
+          <select
+            value={metric}
+            onChange={(e) => onMetricChange(e.target.value)}
+            className={`text-[9px] font-extrabold uppercase tracking-wider bg-transparent border-none outline-none focus:ring-0 p-0 pr-4 cursor-pointer truncate max-w-full font-sans ${
+              theme === 'dark' 
+                ? 'text-neutral-400 hover:text-white [color-scheme:dark]' 
+                : 'text-neutral-500 hover:text-neutral-900'
+            }`}
+          >
+            {Object.entries(metricLabelMap).map(([key, label]) => (
+              <option key={key} value={key} className={theme === 'dark' ? 'bg-neutral-900 text-neutral-200' : 'bg-white text-neutral-800'}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <p className={`text-base font-extrabold tracking-tight font-mono truncate ${
+          theme === 'dark' ? 'text-white' : 'text-neutral-900'
+        }`}>{value}</p>
+      </div>
     </div>
   );
 }
