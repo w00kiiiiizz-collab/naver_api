@@ -116,6 +116,7 @@ export async function GET(request: Request) {
   const force = searchParams.get('force') === 'true';
   const checkStatus = searchParams.get('status') === 'true';
   const syncHierarchy = searchParams.get('syncHierarchy') === 'true';
+  const syncMode = searchParams.get('syncMode');
 
   if (!customerId) {
     return NextResponse.json({ success: false, error: 'Missing customerId' }, { status: 400 });
@@ -139,8 +140,7 @@ export async function GET(request: Request) {
   // Set state to running
   activeSyncs.set(customerId, { status: 'running' });
 
-  // Start background sync
-  (async () => {
+  const runSyncAction = async () => {
     try {
       console.log(`[Background Sync] Starting for customer ${customerId} from ${startDateStr} to ${endDateStr} (force: ${force}, syncHierarchy: ${syncHierarchy})`);
       
@@ -284,8 +284,8 @@ export async function GET(request: Request) {
         await supabaseAdmin.from('campaigns').upsert(campaignRows);
 
         // 2. Fetch Ad Groups for all campaigns concurrently
-        console.log(`[Background Sync] Fetching adgroups for ${campaigns.length} campaigns (concurrency = 1, delay = 100ms)...`);
-        const adgroupsResults = await mapConcurrent(campaigns, 1, 100, async (camp) => {
+        console.log(`[Background Sync] Fetching adgroups for ${campaigns.length} campaigns (concurrency = 3, delay = 50ms)...`);
+        const adgroupsResults = await mapConcurrent(campaigns, 3, 50, async (camp) => {
           try {
             return await makeNaverRequest('/ncc/adgroups', 'GET', customerId, `nccCampaignId=${camp.nccCampaignId}`, customKeys);
           } catch (err) {
@@ -308,32 +308,32 @@ export async function GET(request: Request) {
           await supabaseAdmin.from('ad_groups').upsert(adgroupRows);
         }
 
-        // 3. Fetch Ads and Keywords for all adgroups concurrently
-        let ads: any[] = [];
-        let keywords: any[] = [];
-
+        // 3. Fetch Ads and Keywords for all adgroups concurrently in parallel
         if (adgroups.length > 0) {
-          console.log(`[Background Sync] Fetching ads and keywords for ${adgroups.length} adgroups (concurrency = 1, delay = 100ms)...`);
+          console.log(`[Background Sync] Fetching ads and keywords for ${adgroups.length} adgroups in parallel (concurrency = 3, delay = 50ms)...`);
           
-          const adsResults = await mapConcurrent(adgroups, 1, 100, async (adg) => {
-            try {
-              return await makeNaverRequest('/ncc/ads', 'GET', customerId, `nccAdgroupId=${adg.nccAdgroupId}`, customKeys);
-            } catch (err) {
-              console.error(`Failed to fetch ads for adgroup ${adg.nccAdgroupId}:`, err);
-              return [];
-            }
-          });
+          const [adsResults, keywordsResults] = await Promise.all([
+            mapConcurrent(adgroups, 3, 50, async (adg) => {
+              try {
+                return await makeNaverRequest('/ncc/ads', 'GET', customerId, `nccAdgroupId=${adg.nccAdgroupId}`, customKeys);
+              } catch (err) {
+                console.error(`Failed to fetch ads for adgroup ${adg.nccAdgroupId}:`, err);
+                return [];
+              }
+            }),
+            mapConcurrent(adgroups, 3, 50, async (adg) => {
+              try {
+                return await makeNaverRequest('/ncc/keywords', 'GET', customerId, `nccAdgroupId=${adg.nccAdgroupId}`, customKeys);
+              } catch (err) {
+                console.error(`Failed to fetch keywords for adgroup ${adg.nccAdgroupId}:`, err);
+                return [];
+              }
+            })
+          ]);
+
           ads = adsResults.flat();
           ads.forEach(ad => allAdIds.push(ad.nccAdId));
 
-          const keywordsResults = await mapConcurrent(adgroups, 1, 100, async (adg) => {
-            try {
-              return await makeNaverRequest('/ncc/keywords', 'GET', customerId, `nccAdgroupId=${adg.nccAdgroupId}`, customKeys);
-            } catch (err) {
-              console.error(`Failed to fetch keywords for adgroup ${adg.nccAdgroupId}:`, err);
-              return [];
-            }
-          });
           keywords = keywordsResults.flat();
           keywords.forEach(kw => allKeywordIds.push(kw.nccKeywordId));
 
@@ -373,10 +373,9 @@ export async function GET(request: Request) {
         }
       }
 
-      // 4. Fetch and upsert stats for target dates in batches
-      for (const dateStr of datesToSync) {
-        console.log(`[Background Sync] Syncing stats for date: ${dateStr}...`);
-
+      // 4. Fetch and upsert stats for target dates in parallel
+      console.log(`[Background Sync] Fetching stats for ${datesToSync.length} dates in parallel...`);
+      await Promise.all(datesToSync.map(async (dateStr) => {
         // Campaign stats
         if (allCampaignIds.length > 0) {
           const campStats = await fetchStatsInBatchesForDate(allCampaignIds, customerId, dateStr, 'campaign', customKeys);
@@ -408,7 +407,7 @@ export async function GET(request: Request) {
             await supabaseAdmin.from('keyword_stats').upsert(kwStats, { onConflict: 'ncc_keyword_id, stat_date' });
           }
         }
-      }
+      }));
 
       // 5. Save synced dates to avoid duplicate fetches in the future
       const syncedDatesRows = datesToSync.map(d => ({
@@ -422,8 +421,20 @@ export async function GET(request: Request) {
     } catch (err: any) {
       console.error(`[Background Sync] Error for customer ${customerId}:`, err);
       activeSyncs.set(customerId, { status: 'failed', error: err.message });
+      throw err;
     }
-  })();
+  };
 
+  if (syncMode === 'sync') {
+    try {
+      await runSyncAction();
+      return NextResponse.json({ success: true, status: 'success' });
+    } catch (err: any) {
+      return NextResponse.json({ success: false, error: err.message || 'Sync failed' }, { status: 500 });
+    }
+  }
+
+  // Fallback to background async execution
+  runSyncAction().catch(e => console.error('[Sync API] Background sync failed:', e));
   return NextResponse.json({ success: true, message: 'Sync started in background', status: 'running' });
 }

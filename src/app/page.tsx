@@ -557,12 +557,12 @@ export default function Home() {
     setHoveredIndex(null);
   };
 
-  // 7. On-Demand Sync for Date Range with Polling
+  // 7. On-Demand Sync for Date Range (Synchronous)
   async function handleSync() {
     if (!selectedAccount) return;
     setSyncing(true);
     setSyncTime(0);
-    setSyncMessage('동기화 요청 중...');
+    setSyncMessage('네이버 API 데이터 동기화 진행 중...');
 
     // Timer to track elapsed time
     const timerInterval = setInterval(() => {
@@ -570,48 +570,26 @@ export default function Home() {
     }, 1000);
 
     try {
-      // 1. Trigger the background sync
-      const res = await fetch(`/api/stats/sync?customerId=${selectedAccount.customer_id}&startDate=${startDate}&endDate=${endDate}&force=true&syncHierarchy=${syncHierarchy}`);
+      // 1. Run sync synchronously and wait for completion
+      const res = await fetch(`/api/stats/sync?customerId=${selectedAccount.customer_id}&startDate=${startDate}&endDate=${endDate}&force=true&syncHierarchy=${syncHierarchy}&syncMode=sync`);
       const result = await res.json();
       
+      clearInterval(timerInterval);
+      setSyncMessage('');
+
       if (!result.success) {
-        clearInterval(timerInterval);
-        alert('동기화 요청 실패: ' + result.error);
+        alert('동기화 실패: ' + (result.error || '알 수 없는 오류가 발생했습니다.'));
         setSyncing(false);
         return;
       }
 
-      setSyncMessage('백그라운드 동기화 중... 데이터가 많으면 수 분 정도 걸릴 수 있습니다.');
-
-      // 2. Poll for status
-      const pollInterval = setInterval(async () => {
-        try {
-          const statusRes = await fetch(`/api/stats/sync?customerId=${selectedAccount.customer_id}&status=true`);
-          const statusData = await statusRes.json();
-          
-          if (statusData.success) {
-            if (statusData.status === 'success') {
-              clearInterval(timerInterval);
-              clearInterval(pollInterval);
-              setSyncMessage('');
-              setSyncing(false);
-              await loadData();
-            } else if (statusData.status === 'failed') {
-              clearInterval(timerInterval);
-              clearInterval(pollInterval);
-              setSyncMessage('');
-              setSyncing(false);
-              alert('동기화 실패: ' + (statusData.error || '알 수 없는 오류가 발생했습니다.'));
-            }
-          }
-        } catch (pollErr) {
-          console.error('Polling error:', pollErr);
-        }
-      }, 3000);
-
+      setSyncing(false);
+      await loadData();
+      alert('동기화가 성공적으로 완료되었습니다!');
     } catch (err) {
       clearInterval(timerInterval);
-      alert('오류가 발생했습니다.');
+      setSyncMessage('');
+      alert('동기화 과정에서 오류가 발생했습니다.');
       setSyncing(false);
     }
   }
