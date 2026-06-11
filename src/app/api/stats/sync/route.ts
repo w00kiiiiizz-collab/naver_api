@@ -215,7 +215,7 @@ export async function GET(request: Request) {
         // Fetch campaigns from database
         const { data: dbCampaigns, error: campErr } = await supabaseAdmin
           .from('campaigns')
-          .select('ncc_campaign_id, name, status')
+          .select('ncc_campaign_id, name, status, type')
           .eq('customer_id', customerIdInt);
         
         if (campErr || !dbCampaigns || dbCampaigns.length === 0) {
@@ -225,7 +225,8 @@ export async function GET(request: Request) {
           campaigns = dbCampaigns.map(c => ({
             nccCampaignId: c.ncc_campaign_id,
             name: c.name,
-            status: c.status
+            status: c.status,
+            campaignTp: c.type
           }));
           allCampaignIds = campaigns.map(c => c.nccCampaignId);
 
@@ -279,7 +280,8 @@ export async function GET(request: Request) {
           ncc_campaign_id: camp.nccCampaignId,
           customer_id: customerIdInt,
           name: camp.name,
-          status: camp.status
+          status: camp.status,
+          type: camp.campaignTp
         }));
         await supabaseAdmin.from('campaigns').upsert(campaignRows);
 

@@ -212,7 +212,7 @@ export default function Home() {
     const { data: camps, error: campErr } = await supabase
       .from('campaigns')
       .select(`
-        ncc_campaign_id, name, status,
+        ncc_campaign_id, name, status, type,
         campaign_stats (
           stat_date, imp_cnt, clk_cnt, ctr, cpc, sales_amt, purchase_ccnt, purchase_conv_amt, purchase_ror, cp_conv
         )
@@ -1318,6 +1318,19 @@ export default function Home() {
                                 </button>
                                 <Megaphone size={12} className="text-blue-500 flex-shrink-0" />
                                 <span className="truncate pr-1" title={camp.name}>{camp.name}</span>
+                                {camp.type && (
+                                  <span className={`text-[8px] px-1.5 py-0.5 rounded-md font-bold whitespace-nowrap flex-shrink-0 ml-1.5 ${
+                                    camp.type === 'SHOPPING' 
+                                      ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30' 
+                                      : camp.type === 'WEB' 
+                                        ? 'bg-blue-500/15 text-blue-400 border border-blue-500/30'
+                                        : camp.type === 'CONTENTS'
+                                          ? 'bg-purple-500/15 text-purple-400 border border-purple-500/30'
+                                          : 'bg-neutral-800 text-neutral-400 border border-neutral-700'
+                                  }`}>
+                                    {camp.type === 'SHOPPING' ? '쇼핑검색' : camp.type === 'WEB' ? '파워링크' : camp.type === 'CONTENTS' ? '파워컨텐츠' : camp.type}
+                                  </span>
+                                )}
                               </div>
                             </td>
                             <td className="px-2 py-2.5 text-center whitespace-nowrap">

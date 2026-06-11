@@ -180,7 +180,8 @@ async function runSync() {
           ncc_campaign_id: camp.nccCampaignId,
           customer_id: account.customerId,
           name: camp.name,
-          status: camp.status
+          status: camp.status,
+          type: camp.campaignTp
         });
         allCampaignIds.push(camp.nccCampaignId);
 
