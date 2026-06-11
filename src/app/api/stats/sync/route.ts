@@ -204,6 +204,8 @@ export async function GET(request: Request) {
       let runFullHierarchySync = syncHierarchy;
 
       let campaigns: any[] = [];
+      let ads: any[] = [];
+      let keywords: any[] = [];
       let allCampaignIds: string[] = [];
       let allAdgroupIds: string[] = [];
       let allAdIds: string[] = [];
