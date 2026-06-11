@@ -103,6 +103,12 @@ export default function Home() {
   const [accounts, setAccounts] = useState<any[]>([]);
   const [selectedAccount, setSelectedAccount] = useState<any | null>(null);
   
+  // View states & overall aggregates
+  const [activeView, setActiveView] = useState<'overview' | 'detail'>('overview');
+  const [allCampaignsList, setAllCampaignsList] = useState<any[]>([]);
+  const [loadingOverview, setLoadingOverview] = useState(true);
+  const [syncingBizmoney, setSyncingBizmoney] = useState(false);
+  
   // Raw data from database
   const [rawCampaigns, setRawCampaigns] = useState<any[]>([]);
   const [rawAdgroups, setRawAdgroups] = useState<any[]>([]);
@@ -204,8 +210,36 @@ export default function Home() {
     return accounts.filter(acc => acc.ad_account_name.toLowerCase().includes(searchQuery.toLowerCase()));
   }, [accounts, searchQuery]);
 
-  // 2. Load hierarchy and stats when account is selected
-  async function loadData() {
+  // 2. Load overview stats for all accounts
+  async function loadOverviewData() {
+    if (accounts.length === 0) return;
+    setLoadingOverview(true);
+    setDbError(null);
+    
+    const allowedCustomerIds = accounts.map(a => a.customer_id);
+    
+    const { data: camps, error: campErr } = await supabase
+      .from('campaigns')
+      .select(`
+        customer_id, ncc_campaign_id, name, status, type,
+        campaign_stats (
+          stat_date, imp_cnt, clk_cnt, ctr, cpc, sales_amt, purchase_ccnt, purchase_conv_amt, purchase_ror, cp_conv
+        )
+      `)
+      .in('customer_id', allowedCustomerIds)
+      .gte('campaign_stats.stat_date', startDate)
+      .lte('campaign_stats.stat_date', endDate);
+
+    if (campErr && campErr.message.includes("Could not find the table")) {
+      setDbError("Supabase 데이터베이스에 Campaigns 테이블이 구성되지 않았습니다.");
+    }
+
+    setAllCampaignsList(camps || []);
+    setLoadingOverview(false);
+  }
+
+  // 2.5. Load detailed data for selected account
+  async function loadDetailData() {
     if (!selectedAccount) return;
     setLoading(true);
     setDbError(null);
@@ -299,9 +333,52 @@ export default function Home() {
     setLoading(false);
   }
 
+  // Live Bizmoney Sync
+  const syncAllBizmoney = async () => {
+    if (!userProfile || accounts.length === 0) return;
+    setSyncingBizmoney(true);
+    try {
+      const managerNo = userProfile.role === 'manager' ? userProfile.manager_account_no : '';
+      const response = await fetch(`/api/bizmoney/sync?managerAccountNo=${managerNo || ''}`);
+      const resData = await response.json();
+      if (resData.success) {
+        // Refresh ad_accounts from DB to load updated bizmoney values
+        let query = supabase.from('ad_accounts').select('*');
+        if (userProfile.role === 'manager' && userProfile.manager_account_no) {
+          query = query.eq('manager_account_no', userProfile.manager_account_no);
+        }
+        const { data } = await query.order('ad_account_name');
+        if (data) {
+          setAccounts(data);
+        }
+      }
+    } catch (e) {
+      console.error('Failed to sync bizmoney:', e);
+    } finally {
+      setSyncingBizmoney(false);
+    }
+  };
+
+  // 2.6. Load Overview Data when accounts or dates change
   useEffect(() => {
-    loadData();
-  }, [selectedAccount, startDate, endDate]);
+    if (accounts.length > 0) {
+      loadOverviewData();
+    }
+  }, [accounts, startDate, endDate]);
+
+  // 2.7. Load Detail Data when viewing detail
+  useEffect(() => {
+    if (activeView === 'detail' && selectedAccount) {
+      loadDetailData();
+    }
+  }, [activeView, selectedAccount, startDate, endDate]);
+
+  // 2.8. Auto-sync bizmoney on first load once userProfile & accounts exist
+  useEffect(() => {
+    if (userProfile && accounts.length > 0) {
+      syncAllBizmoney();
+    }
+  }, [userProfile, accounts.length > 0]);
 
   // Expand campaigns by default once data is loaded to make it easy for user
   useEffect(() => {
@@ -447,6 +524,95 @@ export default function Home() {
   const sortedAds = useMemo(() => getSortedData(adsData), [adsData, sortField, sortOrder]);
   const sortedKeywords = useMemo(() => getSortedData(keywordsData), [keywordsData, sortField, sortOrder]);
   const sortedShoppingQueries = useMemo(() => getSortedData(shoppingQueriesData), [shoppingQueriesData, sortField, sortOrder]);
+
+  // Aggregate stats by customer_id for all connected accounts
+  const allAccountsStats = useMemo(() => {
+    const statsMap: Record<number | string, {
+      imp_cnt: number;
+      clk_cnt: number;
+      sales_amt: number;
+      purchase_ccnt: number;
+      purchase_conv_amt: number;
+      ctr: number;
+      cpc: number;
+      purchase_ror: number;
+      cp_conv: number;
+    }> = {};
+
+    // Initialize with empty stats
+    accounts.forEach(acc => {
+      statsMap[acc.customer_id] = {
+        imp_cnt: 0,
+        clk_cnt: 0,
+        sales_amt: 0,
+        purchase_ccnt: 0,
+        purchase_conv_amt: 0,
+        ctr: 0,
+        cpc: 0,
+        purchase_ror: 0,
+        cp_conv: 0
+      };
+    });
+
+    // Sum from campaigns
+    allCampaignsList.forEach(camp => {
+      const custId = camp.customer_id;
+      if (!statsMap[custId]) return;
+
+      (camp.campaign_stats || []).forEach((stat: any) => {
+        if (stat.stat_date >= startDate && stat.stat_date <= endDate) {
+          statsMap[custId].imp_cnt += (stat.imp_cnt || 0);
+          statsMap[custId].clk_cnt += (stat.clk_cnt || 0);
+          statsMap[custId].sales_amt += (stat.sales_amt || 0);
+          statsMap[custId].purchase_ccnt += (stat.purchase_ccnt || 0);
+          statsMap[custId].purchase_conv_amt += (stat.purchase_conv_amt || 0);
+        }
+      });
+    });
+
+    // Compute derived rates
+    accounts.forEach(acc => {
+      const s = statsMap[acc.customer_id];
+      s.ctr = s.imp_cnt > 0 ? (s.clk_cnt / s.imp_cnt) * 100 : 0;
+      s.cpc = s.clk_cnt > 0 ? Math.round(s.sales_amt / s.clk_cnt) : 0;
+      s.purchase_ror = s.sales_amt > 0 ? (s.purchase_conv_amt / s.sales_amt) * 100 : 0;
+      s.cp_conv = s.purchase_ccnt > 0 ? Math.round(s.sales_amt / s.purchase_ccnt) : 0;
+    });
+
+    return statsMap;
+  }, [accounts, allCampaignsList, startDate, endDate]);
+
+  // Overall combined totals across all accounts
+  const overallSummary = useMemo(() => {
+    const totals = {
+      imp_cnt: 0,
+      clk_cnt: 0,
+      sales_amt: 0,
+      purchase_ccnt: 0,
+      purchase_conv_amt: 0
+    };
+
+    Object.values(allAccountsStats).forEach(s => {
+      totals.imp_cnt += s.imp_cnt;
+      totals.clk_cnt += s.clk_cnt;
+      totals.sales_amt += s.sales_amt;
+      totals.purchase_ccnt += s.purchase_ccnt;
+      totals.purchase_conv_amt += s.purchase_conv_amt;
+    });
+
+    const ctr = totals.imp_cnt > 0 ? (totals.clk_cnt / totals.imp_cnt) * 100 : 0;
+    const cpc = totals.clk_cnt > 0 ? Math.round(totals.sales_amt / totals.clk_cnt) : 0;
+    const purchase_ror = totals.sales_amt > 0 ? (totals.purchase_conv_amt / totals.sales_amt) * 100 : 0;
+    const cp_conv = totals.purchase_ccnt > 0 ? Math.round(totals.sales_amt / totals.purchase_ccnt) : 0;
+
+    return {
+      ...totals,
+      ctr,
+      cpc,
+      purchase_ror,
+      cp_conv
+    };
+  }, [allAccountsStats]);
 
   // Overall account summary (summed from top-level campaigns)
   const summary = useMemo(() => {
@@ -629,7 +795,8 @@ export default function Home() {
       }
 
       setSyncing(false);
-      await loadData();
+      await loadDetailData();
+      await loadOverviewData();
       alert('동기화가 성공적으로 완료되었습니다!');
     } catch (err) {
       clearInterval(timerInterval);
@@ -789,6 +956,232 @@ export default function Home() {
     );
   }
 
+  const renderOverview = () => {
+    return (
+      <div className="space-y-5">
+        {/* Header Controls for Overview */}
+        <header className="flex flex-col xl:flex-row justify-between items-start xl:items-end gap-3 pb-1">
+          <div>
+            <h1 className={`text-xl font-bold tracking-tight ${theme === 'dark' ? 'text-white' : 'text-neutral-900'}`}>
+              전체 계정 종합 요약
+            </h1>
+            <p className="text-neutral-500 text-[10px] font-semibold">모든 연동 계정의 성과 및 잔액 일괄 확인</p>
+          </div>
+          
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Date Presets */}
+            <div className={`flex rounded-lg p-0.5 text-[10px] font-semibold border ${
+              theme === 'dark' ? 'bg-neutral-950 border-neutral-800' : 'bg-gray-100 border-gray-200'
+            }`}>
+              {[
+                { id: 'yesterday', label: '어제' },
+                { id: '7days', label: '7일' },
+                { id: '14days', label: '14일' },
+                { id: '30days', label: '30일' },
+                { id: 'lastMonth', label: '전월', highlight: true },
+                { id: 'monthBeforeLast', label: '전전월', highlight: true }
+              ].map(p => {
+                const isActive = selectedPreset === p.id;
+                return (
+                  <button
+                    key={p.id}
+                    onClick={() => setPresetRange(p.id as any)}
+                    className={`px-2 py-1 rounded transition-all cursor-pointer ${
+                      isActive
+                        ? theme === 'dark'
+                          ? 'bg-blue-600 text-white font-semibold shadow-md'
+                          : 'bg-white text-blue-600 shadow-sm font-semibold'
+                        : p.highlight 
+                          ? 'text-blue-500 hover:bg-neutral-900/20' 
+                          : 'text-neutral-500 hover:text-neutral-900'
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Date Range Selector */}
+            <div className={`flex items-center rounded-lg px-2 py-0.5 border ${
+              theme === 'dark' ? 'bg-neutral-950 border-neutral-800' : 'bg-white border-gray-200'
+            }`}>
+              <Calendar size={12} className="text-neutral-500 mr-1.5" />
+              <input 
+                type="date" 
+                value={startDate}
+                onChange={(e) => {
+                  setStartDate(e.target.value);
+                  setSelectedPreset('custom');
+                }}
+                className={`bg-transparent border-none outline-none py-0.5 cursor-pointer w-22 text-[10px] focus:ring-0 ${
+                  theme === 'dark' ? 'text-neutral-300' : 'text-neutral-700'
+                }`}
+              />
+              <span className="text-neutral-600 mx-0.5">~</span>
+              <input 
+                type="date" 
+                value={endDate}
+                onChange={(e) => {
+                  setEndDate(e.target.value);
+                  setSelectedPreset('custom');
+                }}
+                className={`bg-transparent border-none outline-none py-0.5 cursor-pointer w-22 text-[10px] focus:ring-0 ${
+                  theme === 'dark' ? 'text-neutral-300' : 'text-neutral-700'
+                }`}
+              />
+            </div>
+
+            {/* Bizmoney Sync Button */}
+            <button 
+              onClick={syncAllBizmoney}
+              disabled={syncingBizmoney}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:from-emerald-800 text-white font-bold rounded-lg shadow-md transition-all text-[10px] cursor-pointer"
+            >
+              <RefreshCw size={10} className={syncingBizmoney ? "animate-spin" : ""} />
+              {syncingBizmoney ? '잔액 갱신 중...' : '비즈머니 잔액 갱신'}
+            </button>
+
+            {/* Theme Toggle Button */}
+            <button 
+              onClick={() => setTheme(prev => prev === 'dark' ? 'light' : 'dark')}
+              className={`p-1.5 border rounded-lg transition-colors cursor-pointer ${
+                theme === 'dark' 
+                  ? 'bg-neutral-950 border-neutral-800 hover:bg-neutral-900 text-amber-400' 
+                  : 'bg-white border-gray-200 hover:bg-gray-100 text-indigo-600'
+              }`}
+            >
+              {theme === 'dark' ? <Sun size={12} /> : <Moon size={12} />}
+            </button>
+          </div>
+        </header>
+
+        {/* Summary Cards */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <SummaryCard 
+            metric={card1Metric} 
+            value={formatMetricValue(card1Metric, overallSummary[card1Metric as keyof typeof overallSummary] || 0)} 
+            icon={getMetricIcon(card1Metric)} 
+            theme={theme} 
+            onMetricChange={setCard1Metric} 
+            metricLabelMap={metricLabelMap} 
+          />
+          <SummaryCard 
+            metric={card2Metric} 
+            value={formatMetricValue(card2Metric, overallSummary[card2Metric as keyof typeof overallSummary] || 0)} 
+            icon={getMetricIcon(card2Metric)} 
+            theme={theme} 
+            onMetricChange={setCard2Metric} 
+            metricLabelMap={metricLabelMap} 
+          />
+          <SummaryCard 
+            metric={card3Metric} 
+            value={formatMetricValue(card3Metric, overallSummary[card3Metric as keyof typeof overallSummary] || 0)} 
+            icon={getMetricIcon(card3Metric)} 
+            theme={theme} 
+            onMetricChange={setCard3Metric} 
+            metricLabelMap={metricLabelMap} 
+          />
+          <SummaryCard 
+            metric={card4Metric} 
+            value={formatMetricValue(card4Metric, overallSummary[card4Metric as keyof typeof overallSummary] || 0)} 
+            icon={getMetricIcon(card4Metric)} 
+            theme={theme} 
+            onMetricChange={setCard4Metric} 
+            metricLabelMap={metricLabelMap} 
+          />
+        </div>
+
+        {/* Accounts Overview Table */}
+        <div className={`rounded-xl border shadow-xl overflow-hidden ${
+          theme === 'dark' ? 'bg-neutral-950 border-neutral-850' : 'bg-white border-gray-200'
+        }`}>
+          <div className="w-full overflow-x-auto custom-scrollbar">
+            <table className="w-full min-w-[1000px] border-collapse text-[11px]">
+              <thead>
+                <tr className={`border-b text-[10px] uppercase tracking-wider font-bold ${
+                  theme === 'dark' ? 'bg-neutral-950 border-neutral-850 text-neutral-500' : 'bg-gray-100 border-gray-200 text-neutral-500'
+                }`}>
+                  <th className="px-3 py-3 text-left w-[18%] border-r border-neutral-900/10 whitespace-nowrap">광고주 계정</th>
+                  <th className="px-3 py-3 text-right w-[11%] border-r border-neutral-900/10 text-emerald-500 whitespace-nowrap">비즈머니 잔액</th>
+                  <th className="px-2 py-3 text-right w-[8%] border-r border-neutral-900/10 whitespace-nowrap">노출수</th>
+                  <th className="px-2 py-3 text-right w-[6%] border-r border-neutral-900/10 whitespace-nowrap">클릭수</th>
+                  <th className="px-2 py-3 text-right w-[6%] border-r border-neutral-900/10 whitespace-nowrap">클릭률</th>
+                  <th className="px-2 py-3 text-right w-[8%] border-r border-neutral-900/10 whitespace-nowrap">평균CPC</th>
+                  <th className="px-2 py-3 text-right w-[9%] border-r border-neutral-900/10 whitespace-nowrap">총비용</th>
+                  <th className="px-2 py-3 text-right w-[7%] border-r border-neutral-900/10 whitespace-nowrap">전환수</th>
+                  <th className="px-2 py-3 text-right w-[10%] border-r border-neutral-900/10 whitespace-nowrap">전환매출액</th>
+                  <th className="px-2 py-3 text-right w-[7%] border-r border-neutral-900/10 whitespace-nowrap">ROAS</th>
+                  <th className="px-2 py-3 text-right w-[10%] border-r border-neutral-900/10 whitespace-nowrap">전환당비용</th>
+                  <th className="px-2 py-3 text-center w-[5%] whitespace-nowrap">상세</th>
+                </tr>
+              </thead>
+              <tbody className={`divide-y font-semibold ${
+                theme === 'dark' ? 'divide-neutral-900/60 text-neutral-300' : 'divide-gray-100 text-neutral-700'
+              }`}>
+                {loadingOverview ? (
+                  <tr>
+                    <td colSpan={12} className="px-6 py-12 text-center text-neutral-500">
+                      계정 종합 요약 정보를 불러오는 중입니다...
+                    </td>
+                  </tr>
+                ) : filteredAccounts.length === 0 ? (
+                  <tr>
+                    <td colSpan={12} className="px-6 py-12 text-center text-neutral-500">
+                      연동된 계정이 없습니다.
+                    </td>
+                  </tr>
+                ) : (
+                  filteredAccounts.map(acc => {
+                    const s = allAccountsStats[acc.customer_id] || {
+                      imp_cnt: 0, clk_cnt: 0, sales_amt: 0, purchase_ccnt: 0, purchase_conv_amt: 0,
+                      ctr: 0, cpc: 0, purchase_ror: 0, cp_conv: 0
+                    };
+                    return (
+                      <tr key={acc.customer_id} className={`transition-colors ${
+                        theme === 'dark' ? 'hover:bg-neutral-900/40 text-neutral-300' : 'hover:bg-gray-50 text-neutral-700'
+                      }`}>
+                        <td className="px-3 py-2.5">
+                          <div className="flex flex-col">
+                            <span className={`font-bold ${theme === 'dark' ? 'text-white' : 'text-neutral-900'}`}>{acc.ad_account_name}</span>
+                            <span className="text-[8.5px] text-neutral-500 font-normal mt-0.5">ID: {acc.customer_id}</span>
+                          </div>
+                        </td>
+                        <td className="px-3 py-2.5 text-right font-mono text-emerald-500 font-bold whitespace-nowrap border-r border-neutral-900/10">
+                          {Math.round(acc.bizmoney || 0).toLocaleString()}원
+                        </td>
+                        <td className="px-2 py-2.5 text-right font-mono whitespace-nowrap border-r border-neutral-900/10">{formatMetricValue('imp_cnt', s.imp_cnt)}</td>
+                        <td className="px-2 py-2.5 text-right font-mono whitespace-nowrap border-r border-neutral-900/10">{formatMetricValue('clk_cnt', s.clk_cnt)}</td>
+                        <td className="px-2 py-2.5 text-right font-mono whitespace-nowrap border-r border-neutral-900/10">{formatMetricValue('ctr', s.ctr)}</td>
+                        <td className="px-2 py-2.5 text-right font-mono whitespace-nowrap border-r border-neutral-900/10">{formatMetricValue('cpc', s.cpc)}</td>
+                        <td className="px-2 py-2.5 text-right font-mono whitespace-nowrap border-r border-neutral-900/10">{formatMetricValue('sales_amt', s.sales_amt)}</td>
+                        <td className="px-2 py-2.5 text-right font-mono whitespace-nowrap border-r border-neutral-900/10">{formatMetricValue('purchase_ccnt', s.purchase_ccnt)}</td>
+                        <td className="px-2 py-2.5 text-right font-mono whitespace-nowrap border-r border-neutral-900/10">{formatMetricValue('purchase_conv_amt', s.purchase_conv_amt)}</td>
+                        <td className="px-2 py-2.5 text-right font-mono whitespace-nowrap border-r border-neutral-900/10">{formatMetricValue('purchase_ror', s.purchase_ror)}</td>
+                        <td className="px-2 py-2.5 text-right font-mono whitespace-nowrap border-r border-neutral-900/10">{formatMetricValue('cp_conv', s.cp_conv)}</td>
+                        <td className="px-2 py-2.5 text-center whitespace-nowrap">
+                          <button
+                            onClick={() => {
+                              setSelectedAccount(acc);
+                              setActiveView('detail');
+                            }}
+                            className="px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded text-[9px] cursor-pointer shadow-sm hover:shadow transition-all"
+                          >
+                            보기
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className={`flex h-screen overflow-hidden text-xs antialiased font-sans transition-colors duration-300 ${
       theme === 'dark' ? 'bg-neutral-900 text-neutral-100 dark' : 'bg-gray-50 text-neutral-800'
@@ -830,15 +1223,42 @@ export default function Home() {
 
         {/* Advertiser List */}
         <div className="overflow-y-auto flex-1 p-2 space-y-0.5 custom-scrollbar">
+          {/* All Accounts Tab */}
+          <div className="px-1 pb-1 border-b border-neutral-905/10 mb-1.5">
+            <button
+              onClick={() => setActiveView('overview')}
+              className={`w-full text-left px-3 py-2 rounded-lg transition-all flex items-center gap-2.5 relative group border text-[11px] ${
+                activeView === 'overview'
+                  ? theme === 'dark'
+                    ? 'bg-blue-600/15 text-blue-400 font-semibold border-blue-500/30'
+                    : 'bg-blue-50 text-blue-600 font-semibold border-blue-200'
+                  : theme === 'dark'
+                    ? 'hover:bg-neutral-900 text-neutral-400 hover:text-neutral-200 border-transparent'
+                    : 'hover:bg-gray-100 text-neutral-600 hover:text-neutral-900 border-transparent'
+              }`}
+            >
+              {activeView === 'overview' && (
+                <div className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-4 bg-blue-500 rounded-r-md"></div>
+              )}
+              <Activity size={12} className={activeView === 'overview' ? "text-blue-500" : "text-neutral-500"} />
+              <div className="min-w-0 flex-1 flex flex-col text-left">
+                <span className="font-bold">🏠 전체 계정 종합 요약</span>
+              </div>
+            </button>
+          </div>
+
           {filteredAccounts.length === 0 && !loading && (
             <p className="text-neutral-500 p-2 text-center text-[10px]">결과가 없습니다.</p>
           )}
           {filteredAccounts.map(acc => {
-            const isSelected = selectedAccount?.customer_id === acc.customer_id;
+            const isSelected = activeView === 'detail' && selectedAccount?.customer_id === acc.customer_id;
             return (
               <button
                 key={acc.customer_id}
-                onClick={() => setSelectedAccount(acc)}
+                onClick={() => {
+                  setSelectedAccount(acc);
+                  setActiveView('detail');
+                }}
                 className={`w-full text-left px-3 py-2 rounded-lg transition-all flex items-center gap-2.5 relative group border text-[11px] ${
                   isSelected
                     ? theme === 'dark'
@@ -939,14 +1359,28 @@ export default function Home() {
             </div>
           )}
 
-          {/* Header Controls */}
-          <header className="flex flex-col xl:flex-row justify-between items-start xl:items-end gap-3 pb-1">
-            <div>
-              <h1 className={`text-xl font-bold tracking-tight ${theme === 'dark' ? 'text-white' : 'text-neutral-900'}`}>
-                {selectedAccount ? selectedAccount.ad_account_name : '광고주를 선택해주세요'}
-              </h1>
-              <p className="text-neutral-500 text-[10px] font-semibold">실시간 마케팅 대시보드</p>
-            </div>
+          {activeView === 'overview' ? renderOverview() : (
+            <>
+              {/* Header Controls */}
+              <header className="flex flex-col xl:flex-row justify-between items-start xl:items-end gap-3 pb-1">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setActiveView('overview')}
+                      className={`px-2.5 py-1 rounded-lg border text-[9px] font-bold transition-all cursor-pointer hover:shadow flex items-center gap-1 ${
+                        theme === 'dark' 
+                          ? 'bg-neutral-950 border-neutral-850 hover:bg-neutral-900 text-neutral-300' 
+                          : 'bg-white border-gray-200 hover:bg-gray-50 text-neutral-700'
+                      }`}
+                    >
+                      <span>⬅️ 전체 목록</span>
+                    </button>
+                    <h1 className={`text-xl font-bold tracking-tight ${theme === 'dark' ? 'text-white' : 'text-neutral-900'}`}>
+                      {selectedAccount ? selectedAccount.ad_account_name : '광고주를 선택해주세요'}
+                    </h1>
+                  </div>
+                  <p className="text-neutral-500 text-[10px] font-semibold mt-0.5">상세 광고 성과 대시보드</p>
+                </div>
             
             <div className="flex flex-wrap items-center gap-2">
               {/* Date Presets (Pill tabs) */}
@@ -1576,6 +2010,8 @@ export default function Home() {
               </table>
             </div>
           </div>
+          </>
+          )}
         </div>
       </div>
 

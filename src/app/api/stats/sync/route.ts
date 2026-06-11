@@ -625,6 +625,21 @@ export async function GET(request: Request) {
       }));
       await supabaseAdmin.from('synced_dates').upsert(syncedDatesRows, { onConflict: 'customer_id, synced_date' });
 
+      // Fetch and update Bizmoney for this account
+      try {
+        console.log(`[Background Sync] Fetching bizmoney for customer ${customerId}`);
+        const bizRes = await makeNaverRequest('/billing/bizmoney', 'GET', customerId, undefined, customKeys);
+        if (bizRes && typeof bizRes.bizmoney === 'number') {
+          await supabaseAdmin
+            .from('ad_accounts')
+            .update({ bizmoney: bizRes.bizmoney })
+            .eq('customer_id', customerIdInt);
+          console.log(`[Background Sync] Updated bizmoney for ${customerId} to ${bizRes.bizmoney}`);
+        }
+      } catch (err: any) {
+        console.error(`[Background Sync] Failed to update bizmoney for customer ${customerId}:`, err.message);
+      }
+
       console.log(`[Background Sync] Successfully completed for customer ${customerId}`);
       activeSyncs.set(customerId, { status: 'success' });
     } catch (err: any) {
