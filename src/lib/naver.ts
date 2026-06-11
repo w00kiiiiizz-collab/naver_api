@@ -10,7 +10,8 @@ export async function makeNaverRequest(
   method: string, 
   customerId: string, 
   queryParams?: string,
-  customKeys?: { apiKey: string; secretKey: string }
+  customKeys?: { apiKey: string; secretKey: string },
+  bodyData?: any
 ) {
   const apiKey = customKeys?.apiKey || process.env.NAVER_API_KEY!;
   const secretKey = customKeys?.secretKey || process.env.NAVER_SECRET_KEY!;
@@ -29,8 +30,16 @@ export async function makeNaverRequest(
   };
 
   const fullUrl = queryParams ? `${baseUrl}${uri}?${queryParams}` : `${baseUrl}${uri}`;
+  const fetchOptions: RequestInit = { 
+    method, 
+    headers 
+  };
 
-  const response = await fetch(fullUrl, { method, headers });
+  if (bodyData && (method === 'POST' || method === 'PUT')) {
+    fetchOptions.body = JSON.stringify(bodyData);
+  }
+
+  const response = await fetch(fullUrl, fetchOptions);
   const text = await response.text();
 
   if (!response.ok) {

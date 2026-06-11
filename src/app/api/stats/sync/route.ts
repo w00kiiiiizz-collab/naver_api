@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase';
-import { makeNaverRequest } from '@/lib/naver';
+import { makeNaverRequest, generateSignature } from '@/lib/naver';
 import { parseISO, differenceInDays, addDays, format } from 'date-fns';
 
 function getAdName(adObj: any) {
@@ -377,6 +377,174 @@ export async function GET(request: Request) {
         }
       }
 
+      const hasShoppingCamps = campaigns.some((c: any) => c.campaignTp === 'SHOPPING' || c.type === 'SHOPPING');
+
+      async function syncShoppingQueriesForDate(dateStr: string) {
+        const customerIdStr = customerId as string;
+        console.log(`[Background Sync] Requesting Shopping Query report for customer ${customerIdStr} on ${dateStr}...`);
+        const statDt = dateStr.replace(/-/g, '');
+        const reportTp = 'SHOPPINGKEYWORD_DETAIL';
+
+        try {
+          // 1. Post report job
+          const body = { reportTp, statDt };
+          const registerRes = await makeNaverRequest('/stat-reports', 'POST', customerIdStr, undefined, customKeys, body);
+          const jobId = registerRes.reportJobId;
+          
+          if (!jobId) {
+            console.log(`[Background Sync] No jobId returned for Shopping Query report on ${dateStr}`);
+            return;
+          }
+
+          // 2. Poll report job status
+          let reportJob = null;
+          for (let i = 0; i < 15; i++) {
+            await sleep(1000);
+            reportJob = await makeNaverRequest(`/stat-reports/${jobId}`, 'GET', customerIdStr, undefined, customKeys);
+            if (reportJob.status === 'BUILT' || reportJob.status === 'NONE' || reportJob.status === 'FAILED') {
+              break;
+            }
+          }
+
+          if (!reportJob || reportJob.status !== 'BUILT') {
+            console.log(`[Background Sync] Shopping Query report did not build for ${dateStr}. Status: ${reportJob?.status}`);
+            return;
+          }
+
+          console.log(`[Background Sync] Shopping Query report ready for ${dateStr}. Downloading...`);
+
+          // 3. Download the report TSV
+          const downloadUri = '/report-download';
+          const downloadTimestamp = Date.now().toString();
+          const secretKey = customKeys?.secretKey || process.env.NAVER_SECRET_KEY!;
+          const apiKey = customKeys?.apiKey || process.env.NAVER_API_KEY!;
+          const signature = generateSignature(downloadTimestamp, 'GET', downloadUri, secretKey);
+
+          const downloadHeaders = {
+            'X-Timestamp': downloadTimestamp,
+            'X-API-KEY': apiKey,
+            'X-Customer': customerIdStr,
+            'X-Signature': signature
+          };
+
+          const downloadRes = await fetch(reportJob.downloadUrl, { headers: downloadHeaders });
+          if (!downloadRes.ok) {
+            console.error(`[Background Sync] Failed to download Shopping Query report: ${downloadRes.status}`);
+            return;
+          }
+
+          const tsvText = await downloadRes.text();
+          const lines = tsvText.split('\n').filter(l => l.trim() !== '');
+          console.log(`[Background Sync] Downloaded ${lines.length} rows for Shopping Query report on ${dateStr}`);
+
+          if (lines.length === 0) return;
+
+          // 4. Load existing ads in DB for FK validation
+          const { data: dbAds } = await supabaseAdmin
+            .from('ads')
+            .select('ncc_ad_id')
+            .eq('customer_id', customerIdInt);
+          const existingAdIds = new Set(dbAds?.map((a: any) => a.ncc_ad_id) || []);
+
+          // 5. Parse and aggregate
+          const queryMap = new Map();
+          const statMap = new Map();
+
+          for (const line of lines) {
+            const cols = line.split('\t');
+            if (cols.length < 15) continue;
+
+            const rawDate = cols[0];
+            if (rawDate.length !== 8) continue;
+            const formattedDate = `${rawDate.substring(0, 4)}-${rawDate.substring(4, 6)}-${rawDate.substring(6, 8)}`;
+
+            const campaignId = cols[2];
+            const adgroupId = cols[3];
+            const query = cols[4];
+            const adId = cols[5];
+
+            // Validate adId exists in DB to prevent foreign key errors
+            if (!existingAdIds.has(adId)) {
+              continue;
+            }
+
+            const imp = parseInt(cols[11], 10) || 0;
+            const clk = parseInt(cols[12], 10) || 0;
+            const cost = parseInt(cols[13], 10) || 0;
+
+            const queryKey = `${adId}::${query}`;
+            if (!queryMap.has(queryKey)) {
+              queryMap.set(queryKey, {
+                ncc_ad_id: adId,
+                ncc_adgroup_id: adgroupId,
+                ncc_campaign_id: campaignId,
+                customer_id: customerIdInt,
+                query: query
+              });
+            }
+
+            const statKey = `${adId}::${query}::${formattedDate}`;
+            if (!statMap.has(statKey)) {
+              statMap.set(statKey, {
+                ncc_ad_id: adId,
+                query: query,
+                stat_date: formattedDate,
+                imp_cnt: 0,
+                clk_cnt: 0,
+                sales_amt: 0
+              });
+            }
+
+            const stat = statMap.get(statKey);
+            stat.imp_cnt += imp;
+            stat.clk_cnt += clk;
+            stat.sales_amt += cost;
+          }
+
+          // 6. Upsert Queries
+          const queriesToUpsert = Array.from(queryMap.values());
+          if (queriesToUpsert.length > 0) {
+            console.log(`[Background Sync] Upserting ${queriesToUpsert.length} queries to shopping_ad_queries...`);
+            const chunkSize = 200;
+            for (let i = 0; i < queriesToUpsert.length; i += chunkSize) {
+              const chunk = queriesToUpsert.slice(i, i + chunkSize);
+              await supabaseAdmin.from('shopping_ad_queries').upsert(chunk, { onConflict: 'ncc_ad_id, query' });
+            }
+          }
+
+          // 7. Upsert Stats
+          const statsToUpsert = Array.from(statMap.values()).map(stat => {
+            const ctr = stat.imp_cnt > 0 ? (stat.clk_cnt / stat.imp_cnt) * 100 : 0;
+            const cpc = stat.clk_cnt > 0 ? Math.round(stat.sales_amt / stat.clk_cnt) : 0;
+            return {
+              ncc_ad_id: stat.ncc_ad_id,
+              query: stat.query,
+              stat_date: stat.stat_date,
+              imp_cnt: stat.imp_cnt,
+              clk_cnt: stat.clk_cnt,
+              ctr: ctr,
+              cpc: cpc,
+              sales_amt: stat.sales_amt,
+              purchase_ccnt: 0,
+              purchase_conv_amt: 0,
+              purchase_ror: 0,
+              cp_conv: 0
+            };
+          });
+
+          if (statsToUpsert.length > 0) {
+            console.log(`[Background Sync] Upserting ${statsToUpsert.length} query stats to shopping_ad_query_stats...`);
+            const chunkSize = 200;
+            for (let i = 0; i < statsToUpsert.length; i += chunkSize) {
+              const chunk = statsToUpsert.slice(i, i + chunkSize);
+              await supabaseAdmin.from('shopping_ad_query_stats').upsert(chunk, { onConflict: 'ncc_ad_id, query, stat_date' });
+            }
+          }
+        } catch (err) {
+          console.error(`[Background Sync] Error syncing Shopping Queries for ${dateStr}:`, err);
+        }
+      }
+
       // 4. Fetch and upsert stats for target dates in parallel
       console.log(`[Background Sync] Fetching stats for ${datesToSync.length} dates in parallel...`);
       await Promise.all(datesToSync.map(async (dateStr) => {
@@ -410,6 +578,11 @@ export async function GET(request: Request) {
           if (kwStats.length > 0) {
             await supabaseAdmin.from('keyword_stats').upsert(kwStats, { onConflict: 'ncc_keyword_id, stat_date' });
           }
+        }
+
+        // Shopping Query stats
+        if (hasShoppingCamps) {
+          await syncShoppingQueriesForDate(dateStr);
         }
       }));
 

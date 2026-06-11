@@ -108,6 +108,7 @@ export default function Home() {
   const [rawAdgroups, setRawAdgroups] = useState<any[]>([]);
   const [rawAds, setRawAds] = useState<any[]>([]);
   const [rawKeywords, setRawKeywords] = useState<any[]>([]);
+  const [rawShoppingQueries, setRawShoppingQueries] = useState<any[]>([]);
   
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -130,6 +131,7 @@ export default function Home() {
   // Table expansion state
   const [expandedCampaigns, setExpandedCampaigns] = useState<Record<string, boolean>>({});
   const [expandedAdgroups, setExpandedAdgroups] = useState<Record<string, boolean>>({});
+  const [expandedAds, setExpandedAds] = useState<Record<string, boolean>>({});
 
   // Tree Table Sorting State
   const [sortField, setSortField] = useState<string | null>(null);
@@ -264,21 +266,36 @@ export default function Home() {
       .lte('keyword_stats.stat_date', endDate)
       .order('keyword');
 
+    // Fetch Shopping Search Queries
+    const { data: shoppingQueriesList, error: sqErr } = await supabase
+      .from('shopping_ad_queries')
+      .select(`
+        ncc_ad_id, query,
+        shopping_ad_query_stats (
+          stat_date, imp_cnt, clk_cnt, ctr, cpc, sales_amt, purchase_ccnt, purchase_conv_amt, purchase_ror, cp_conv
+        )
+      `)
+      .eq('customer_id', selectedAccount.customer_id)
+      .gte('shopping_ad_query_stats.stat_date', startDate)
+      .lte('shopping_ad_query_stats.stat_date', endDate);
+
     // Check if tables are missing in the schema
     let schemaMissing = false;
     if (campErr && campErr.message.includes("Could not find the table")) schemaMissing = true;
     if (adgErr && adgErr.message.includes("Could not find the table")) schemaMissing = true;
     if (adsErr && adsErr.message.includes("Could not find the table")) schemaMissing = true;
     if (kwErr && kwErr.message.includes("Could not find the table")) schemaMissing = true;
+    if (sqErr && sqErr.message.includes("Could not find the table")) schemaMissing = true;
 
     if (schemaMissing) {
-      setDbError("Supabase 데이터베이스에 광고그룹(`ad_groups`), 소재(`ads`), 키워드(`keywords`) 테이블이 구성되지 않았습니다. 동기화를 시작하기 전에 supabase_schema.sql 스크립트를 Supabase SQL Editor에서 실행하고 'NOTIFY pgrst, 'reload schema';' 명령어로 스키마 캐시를 갱신해 주세요.");
+      setDbError("Supabase 데이터베이스에 광고그룹(`ad_groups`), 소재(`ads`), 키워드(`keywords`), 쇼핑검색어(`shopping_ad_queries`) 테이블이 구성되지 않았습니다. 동기화를 시작하기 전에 supabase_schema.sql 스크립트를 Supabase SQL Editor에서 실행하고 'NOTIFY pgrst, 'reload schema';' 명령어로 스키마 캐시를 갱신해 주세요.");
     }
 
     setRawCampaigns(camps || []);
     setRawAdgroups(adgs || []);
     setRawAds(adsList || []);
     setRawKeywords(keywordsList || []);
+    setRawShoppingQueries(shoppingQueriesList || []);
     setLoading(false);
   }
 
@@ -311,6 +328,7 @@ export default function Home() {
   const handleExpandAll = () => {
     const nextCampaigns: Record<string, boolean> = {};
     const nextAdgroups: Record<string, boolean> = {};
+    const nextAds: Record<string, boolean> = {};
     
     rawCampaigns.forEach(c => {
       nextCampaigns[c.ncc_campaign_id] = true;
@@ -318,14 +336,23 @@ export default function Home() {
     rawAdgroups.forEach(ag => {
       nextAdgroups[ag.ncc_adgroup_id] = true;
     });
+    rawAds.forEach(ad => {
+      nextAds[ad.ncc_ad_id] = true;
+    });
     
     setExpandedCampaigns(nextCampaigns);
     setExpandedAdgroups(nextAdgroups);
+    setExpandedAds(nextAds);
   };
 
   const handleCollapseAll = () => {
     setExpandedCampaigns({});
     setExpandedAdgroups({});
+    setExpandedAds({});
+  };
+
+  const toggleAd = (id: string) => {
+    setExpandedAds(prev => ({ ...prev, [id]: !prev[id] }));
   };
 
   // 3. Client-side Statistics Aggregator
@@ -387,6 +414,15 @@ export default function Home() {
     }));
   }, [rawKeywords, startDate, endDate]);
 
+  const shoppingQueriesData = useMemo(() => {
+    return rawShoppingQueries.map(sq => ({
+      ...sq,
+      name: sq.query,
+      isQuery: true,
+      ...aggregateStats(sq.shopping_ad_query_stats || [])
+    }));
+  }, [rawShoppingQueries, startDate, endDate]);
+
   // 4. Sorting logic at each nested level
   const handleSort = (field: string) => {
     if (sortField === field) {
@@ -410,6 +446,7 @@ export default function Home() {
   const sortedAdgroups = useMemo(() => getSortedData(adgroupsData), [adgroupsData, sortField, sortOrder]);
   const sortedAds = useMemo(() => getSortedData(adsData), [adsData, sortField, sortOrder]);
   const sortedKeywords = useMemo(() => getSortedData(keywordsData), [keywordsData, sortField, sortOrder]);
+  const sortedShoppingQueries = useMemo(() => getSortedData(shoppingQueriesData), [shoppingQueriesData, sortField, sortOrder]);
 
   // Overall account summary (summed from top-level campaigns)
   const summary = useMemo(() => {
@@ -1398,51 +1435,99 @@ export default function Home() {
                                 </tr>
 
                                 {/* Ads (Creatives) under Ad Group */}
-                                {isAdgExpanded && childAds.map(ad => (
-                                  <tr key={ad.ncc_ad_id} className={`transition-colors text-[10px] ${
-                                    theme === 'dark' 
-                                      ? 'bg-neutral-950/20 hover:bg-neutral-900/10 text-neutral-450' 
-                                      : 'bg-gray-100/20 hover:bg-gray-100/50 text-neutral-500'
-                                  }`}>
-                                    <td className="px-3 py-1.5 whitespace-nowrap pl-11 relative">
-                                      {/* Visual tree guide line double nesting */}
-                                      <div className={`absolute left-4 top-0 bottom-0 border-l ${theme === 'dark' ? 'border-neutral-800' : 'border-gray-250'}`}></div>
-                                      <div className={`absolute left-8 top-0 bottom-0 border-l ${theme === 'dark' ? 'border-neutral-800' : 'border-gray-250'}`}></div>
-                                      <div className={`absolute left-8 top-1/2 w-2 border-t ${theme === 'dark' ? 'border-neutral-800' : 'border-gray-250'}`}></div>
+                                {isAdgExpanded && childAds.map(ad => {
+                                  const isAdExpanded = !!expandedAds[ad.ncc_ad_id];
+                                  const childQueries = sortedShoppingQueries.filter(q => q.ncc_ad_id === ad.ncc_ad_id);
 
-                                      <div className="flex items-center gap-1.5 min-w-0 pl-1.5">
-                                        {ad.image_url ? (
-                                          <img 
-                                            src={ad.image_url} 
-                                            alt={ad.name} 
-                                            className="w-5 h-5 object-cover rounded border border-neutral-800 flex-shrink-0 bg-neutral-900"
-                                            onError={(e) => {
-                                              (e.target as HTMLElement).style.display = 'none';
-                                            }}
-                                          />
-                                        ) : (
-                                          <Tag size={9} className="text-neutral-600 flex-shrink-0" />
-                                        )}
-                                        <span className="truncate pr-1" title={ad.name}>{ad.name}</span>
-                                      </div>
-                                    </td>
-                                    <td className="px-2 py-1.5 text-center whitespace-nowrap">
-                                      <div className="flex items-center justify-center gap-1">
-                                        <span className={`w-1 h-1 rounded-full ${ad.status === 'ELIGIBLE' ? 'bg-emerald-500/60' : 'bg-neutral-700'}`}></span>
-                                        <span className="text-[9px] text-neutral-500">{ad.status === 'ELIGIBLE' ? '활성' : '중지'}</span>
-                                      </div>
-                                    </td>
-                                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('imp_cnt', ad.imp_cnt || 0)}</td>
-                                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('clk_cnt', ad.clk_cnt || 0)}</td>
-                                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('ctr', ad.ctr || 0)}</td>
-                                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('cpc', ad.cpc || 0)}</td>
-                                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('sales_amt', ad.sales_amt || 0)}</td>
-                                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('purchase_ccnt', ad.purchase_ccnt || 0)}</td>
-                                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('purchase_conv_amt', ad.purchase_conv_amt || 0)}</td>
-                                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('purchase_ror', ad.purchase_ror || 0)}</td>
-                                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('cp_conv', ad.cp_conv || 0)}</td>
-                                  </tr>
-                                ))}
+                                  return (
+                                    <Fragment key={ad.ncc_ad_id}>
+                                      <tr className={`transition-colors text-[10px] ${
+                                        theme === 'dark' 
+                                          ? 'bg-neutral-950/20 hover:bg-neutral-900/10 text-neutral-450' 
+                                          : 'bg-gray-100/20 hover:bg-gray-100/50 text-neutral-500'
+                                      }`}>
+                                        <td className="px-3 py-1.5 whitespace-nowrap pl-11 relative">
+                                          {/* Visual tree guide line double nesting */}
+                                          <div className={`absolute left-4 top-0 bottom-0 border-l ${theme === 'dark' ? 'border-neutral-800' : 'border-gray-250'}`}></div>
+                                          <div className={`absolute left-8 top-0 bottom-0 border-l ${theme === 'dark' ? 'border-neutral-800' : 'border-gray-250'}`}></div>
+                                          <div className={`absolute left-8 top-1/2 w-2 border-t ${theme === 'dark' ? 'border-neutral-800' : 'border-gray-250'}`}></div>
+
+                                          <div className="flex items-center gap-1.5 min-w-0 pl-1.5">
+                                            {childQueries.length > 0 && (
+                                              <button 
+                                                onClick={() => toggleAd(ad.ncc_ad_id)}
+                                                className="p-0.5 hover:bg-neutral-855 rounded transition-colors text-neutral-500 hover:text-neutral-300 cursor-pointer flex-shrink-0"
+                                              >
+                                                {isAdExpanded ? <ChevronDown size={9} /> : <ChevronRight size={9} />}
+                                              </button>
+                                            )}
+                                            {ad.image_url ? (
+                                              <img 
+                                                src={ad.image_url} 
+                                                alt={ad.name} 
+                                                className="w-5 h-5 object-cover rounded border border-neutral-800 flex-shrink-0 bg-neutral-900"
+                                                onError={(e) => {
+                                                  (e.target as HTMLElement).style.display = 'none';
+                                                }}
+                                              />
+                                            ) : (
+                                              <Tag size={9} className="text-neutral-600 flex-shrink-0" />
+                                            )}
+                                            <span className="truncate pr-1" title={ad.name}>{ad.name}</span>
+                                          </div>
+                                        </td>
+                                        <td className="px-2 py-1.5 text-center whitespace-nowrap">
+                                          <div className="flex items-center justify-center gap-1">
+                                            <span className={`w-1 h-1 rounded-full ${ad.status === 'ELIGIBLE' ? 'bg-emerald-500/60' : 'bg-neutral-700'}`}></span>
+                                            <span className="text-[9px] text-neutral-500">{ad.status === 'ELIGIBLE' ? '활성' : '중지'}</span>
+                                          </div>
+                                        </td>
+                                        <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('imp_cnt', ad.imp_cnt || 0)}</td>
+                                        <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('clk_cnt', ad.clk_cnt || 0)}</td>
+                                        <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('ctr', ad.ctr || 0)}</td>
+                                        <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('cpc', ad.cpc || 0)}</td>
+                                        <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('sales_amt', ad.sales_amt || 0)}</td>
+                                        <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('purchase_ccnt', ad.purchase_ccnt || 0)}</td>
+                                        <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('purchase_conv_amt', ad.purchase_conv_amt || 0)}</td>
+                                        <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('purchase_ror', ad.purchase_ror || 0)}</td>
+                                        <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('cp_conv', ad.cp_conv || 0)}</td>
+                                      </tr>
+
+                                      {/* Search Queries under Ad/Creative */}
+                                      {isAdExpanded && childQueries.map(q => (
+                                        <tr key={`${q.ncc_ad_id}-${q.query}`} className={`transition-colors text-[9px] ${
+                                          theme === 'dark' 
+                                            ? 'bg-neutral-950/40 hover:bg-neutral-900/20 text-neutral-500' 
+                                            : 'bg-gray-150/20 hover:bg-gray-150/50 text-neutral-500'
+                                        }`}>
+                                          <td className="px-3 py-1.5 whitespace-nowrap pl-15 relative">
+                                            {/* Visual tree guide line triple nesting */}
+                                            <div className={`absolute left-4 top-0 bottom-0 border-l ${theme === 'dark' ? 'border-neutral-800' : 'border-gray-250'}`}></div>
+                                            <div className={`absolute left-8 top-0 bottom-0 border-l ${theme === 'dark' ? 'border-neutral-800' : 'border-gray-250'}`}></div>
+                                            <div className={`absolute left-12 top-0 bottom-0 border-l ${theme === 'dark' ? 'border-neutral-800' : 'border-gray-250'}`}></div>
+                                            <div className={`absolute left-12 top-1/2 w-2 border-t ${theme === 'dark' ? 'border-neutral-800' : 'border-gray-250'}`}></div>
+
+                                            <div className="flex items-center gap-1.5 min-w-0 pl-1">
+                                              <Search size={8} className="text-emerald-500 flex-shrink-0" />
+                                              <span className="truncate pr-1 text-emerald-500 font-semibold" title={q.query}>{q.query}</span>
+                                              <span className={`text-[6px] px-1 rounded flex-shrink-0 ${theme === 'dark' ? 'bg-neutral-900 text-neutral-500' : 'bg-gray-200 text-neutral-600'}`}>검색어</span>
+                                            </div>
+                                          </td>
+                                          <td className="px-2 py-1.5 text-center whitespace-nowrap text-neutral-650">-</td>
+                                          <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('imp_cnt', q.imp_cnt || 0)}</td>
+                                          <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('clk_cnt', q.clk_cnt || 0)}</td>
+                                          <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('ctr', q.ctr || 0)}</td>
+                                          <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('cpc', q.cpc || 0)}</td>
+                                          <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('sales_amt', q.sales_amt || 0)}</td>
+                                          <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('purchase_ccnt', q.purchase_ccnt || 0)}</td>
+                                          <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('purchase_conv_amt', q.purchase_conv_amt || 0)}</td>
+                                          <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('purchase_ror', q.purchase_ror || 0)}</td>
+                                          <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('cp_conv', q.cp_conv || 0)}</td>
+                                        </tr>
+                                      ))}
+                                    </Fragment>
+                                  );
+                                })}
 
                                 {/* Keywords under Ad Group */}
                                 {isAdgExpanded && childKeywords.map(kw => (
