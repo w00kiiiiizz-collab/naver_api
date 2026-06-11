@@ -218,6 +218,8 @@ export default function Home() {
         )
       `)
       .eq('customer_id', selectedAccount.customer_id)
+      .gte('campaign_stats.stat_date', startDate)
+      .lte('campaign_stats.stat_date', endDate)
       .order('name');
 
     // Fetch Ad Groups
@@ -230,6 +232,8 @@ export default function Home() {
         )
       `)
       .eq('customer_id', selectedAccount.customer_id)
+      .gte('ad_group_stats.stat_date', startDate)
+      .lte('ad_group_stats.stat_date', endDate)
       .order('name');
 
     // Fetch Ads (Creatives)
@@ -242,6 +246,8 @@ export default function Home() {
         )
       `)
       .eq('customer_id', selectedAccount.customer_id)
+      .gte('ad_stats.stat_date', startDate)
+      .lte('ad_stats.stat_date', endDate)
       .order('name');
 
     // Fetch Keywords
@@ -254,6 +260,8 @@ export default function Home() {
         )
       `)
       .eq('customer_id', selectedAccount.customer_id)
+      .gte('keyword_stats.stat_date', startDate)
+      .lte('keyword_stats.stat_date', endDate)
       .order('keyword');
 
     // Check if tables are missing in the schema
@@ -276,7 +284,7 @@ export default function Home() {
 
   useEffect(() => {
     loadData();
-  }, [selectedAccount]);
+  }, [selectedAccount, startDate, endDate]);
 
   // Expand campaigns by default once data is loaded to make it easy for user
   useEffect(() => {
