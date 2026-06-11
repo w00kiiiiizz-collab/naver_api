@@ -24,7 +24,8 @@ async function fetchStatsInBatchesForDate(
   ids: string[],
   customerId: string,
   dateStr: string,
-  entityType: 'campaign' | 'adgroup' | 'ad' | 'keyword'
+  entityType: 'campaign' | 'adgroup' | 'ad' | 'keyword',
+  customKeys?: { apiKey: string; secretKey: string }
 ) {
   const fieldsArray = ["impCnt","clkCnt","ctr","cpc","salesAmt","purchaseCcnt","purchaseConvAmt","purchaseRor","cpConv"];
   const allStatsToUpsert: any[] = [];
@@ -40,7 +41,7 @@ async function fetchStatsInBatchesForDate(
     }).toString();
 
     try {
-      const stats = await makeNaverRequest('/stats', 'GET', customerId, queryParams);
+      const stats = await makeNaverRequest('/stats', 'GET', customerId, queryParams, customKeys);
       if (stats && stats.data) {
         for (const statData of stats.data) {
           const baseStat = {
@@ -75,194 +76,354 @@ async function fetchStatsInBatchesForDate(
   return allStatsToUpsert;
 }
 
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function mapConcurrent<T, R>(items: T[], limit: number, delayMs: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let index = 0;
+  async function worker() {
+    while (index < items.length) {
+      const i = index++;
+      results[i] = await fn(items[i]);
+      if (delayMs > 0 && index < items.length) {
+        await sleep(delayMs);
+      }
+    }
+  }
+  
+  // Stagger worker start times to spread requests evenly
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async (_, idx) => {
+    if (delayMs > 0 && idx > 0) {
+      await sleep(idx * Math.floor(delayMs / limit));
+    }
+    await worker();
+  });
+  
+  await Promise.all(workers);
+  return results;
+}
+
+if (!(global as any).activeSyncs) {
+  (global as any).activeSyncs = new Map<string, { status: 'running' | 'success' | 'failed', error?: string }>();
+}
+const activeSyncs = (global as any).activeSyncs;
+
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const customerId = searchParams.get('customerId');
   const startDateStr = searchParams.get('startDate');
   const endDateStr = searchParams.get('endDate') || startDateStr;
+  const force = searchParams.get('force') === 'true';
+  const checkStatus = searchParams.get('status') === 'true';
+  const syncHierarchy = searchParams.get('syncHierarchy') === 'true';
 
-  if (!customerId || !startDateStr) {
-    return NextResponse.json({ success: false, error: 'Missing customerId or startDate' }, { status: 400 });
+  if (!customerId) {
+    return NextResponse.json({ success: false, error: 'Missing customerId' }, { status: 400 });
   }
 
-  try {
-    console.log(`On-demand sync for customer ${customerId} from ${startDateStr} to ${endDateStr}`);
-    
-    // Parse dates and bound them to avoid long loops (max 31 days)
-    const start = parseISO(startDateStr);
-    const end = parseISO(endDateStr!);
-    const totalDays = differenceInDays(end, start);
+  if (checkStatus) {
+    const syncState = activeSyncs.get(customerId) || { status: 'idle' };
+    return NextResponse.json({ success: true, ...syncState });
+  }
 
-    if (totalDays < 0) {
-      return NextResponse.json({ success: false, error: 'startDate must be before or equal to endDate' }, { status: 400 });
-    }
-    if (totalDays > 31) {
-      return NextResponse.json({ success: false, error: 'Cannot sync more than 31 days at once' }, { status: 400 });
-    }
+  if (!startDateStr) {
+    return NextResponse.json({ success: false, error: 'Missing startDate' }, { status: 400 });
+  }
 
-    // --- CHECK ALREADY SYNCED DATES ---
-    const { data: alreadySynced } = await supabaseAdmin
-      .from('synced_dates')
-      .select('synced_date')
-      .eq('customer_id', parseInt(customerId, 10))
-      .gte('synced_date', startDateStr)
-      .lte('synced_date', endDateStr);
+  // Check if sync is already running for this customer
+  const currentSync = activeSyncs.get(customerId);
+  if (currentSync && currentSync.status === 'running') {
+    return NextResponse.json({ success: true, message: 'Sync already running', status: 'running' });
+  }
 
-    const syncedDateSet = new Set(alreadySynced?.map((d: any) => d.synced_date) || []);
-    
-    const datesToSync: string[] = [];
-    for (let d = 0; d <= totalDays; d++) {
-      const dateStr = format(addDays(start, d), 'yyyy-MM-dd');
-      if (!syncedDateSet.has(dateStr)) {
-        datesToSync.push(dateStr);
-      }
-    }
+  // Set state to running
+  activeSyncs.set(customerId, { status: 'running' });
 
-    if (datesToSync.length === 0) {
-      console.log('All dates in range are already synced. Skipping Naver API calls.');
-      return NextResponse.json({ success: true, message: `All dates between ${startDateStr} and ${endDateStr} are already synced.`, skipped: true });
-    }
-
-    console.log(`Need to sync dates: ${datesToSync.join(', ')}`);
-
-    // 1. Fetch campaigns for this customer
-    let campaigns: any[] = [];
+  // Start background sync
+  (async () => {
     try {
-      campaigns = await makeNaverRequest('/ncc/campaigns', 'GET', customerId);
-    } catch (err: any) {
-      return NextResponse.json({ success: false, error: 'Failed to fetch campaigns' }, { status: 500 });
-    }
+      console.log(`[Background Sync] Starting for customer ${customerId} from ${startDateStr} to ${endDateStr} (force: ${force}, syncHierarchy: ${syncHierarchy})`);
+      
+      const customerIdInt = parseInt(customerId, 10);
+      
+      // Fetch Naver API keys from user_profiles if they exist for this customerId
+      let customKeys: { apiKey: string; secretKey: string } | undefined;
+      const { data: profile } = await supabaseAdmin
+        .from('user_profiles')
+        .select('naver_api_key, naver_secret_key')
+        .eq('naver_customer_id', customerIdInt)
+        .maybeSingle();
 
-    if (!Array.isArray(campaigns) || campaigns.length === 0) {
-      return NextResponse.json({ success: true, message: 'No campaigns found' });
-    }
-
-    const allCampaignIds: string[] = [];
-    const allAdgroupIds: string[] = [];
-    const allAdIds: string[] = [];
-    const allKeywordIds: string[] = [];
-
-    // 2. Fetch Hierarchy and save it
-    for (const camp of campaigns) {
-      await supabaseAdmin.from('campaigns').upsert({
-        ncc_campaign_id: camp.nccCampaignId,
-        customer_id: parseInt(customerId, 10),
-        name: camp.name,
-        status: camp.status
-      });
-      allCampaignIds.push(camp.nccCampaignId);
-
-      // Fetch Ad Groups
-      let adgroups: any[] = [];
-      try {
-        adgroups = await makeNaverRequest('/ncc/adgroups', 'GET', customerId, `nccCampaignId=${camp.nccCampaignId}`);
-      } catch (err) {
-        console.error(`Failed to fetch adgroups for campaign ${camp.nccCampaignId}`);
-        continue;
+      if (profile && profile.naver_api_key && profile.naver_secret_key) {
+        customKeys = {
+          apiKey: profile.naver_api_key,
+          secretKey: profile.naver_secret_key
+        };
+        console.log(`[Background Sync] Using custom Naver API keys for customer ${customerId}`);
+      } else {
+        console.log(`[Background Sync] Using default master Naver API keys for customer ${customerId}`);
       }
 
-      if (!Array.isArray(adgroups)) continue;
+      const start = parseISO(startDateStr);
+      const end = parseISO(endDateStr!);
+      const totalDays = differenceInDays(end, start);
 
-      for (const adg of adgroups) {
-        await supabaseAdmin.from('ad_groups').upsert({
-          ncc_adgroup_id: adg.nccAdgroupId,
-          ncc_campaign_id: camp.nccCampaignId,
-          customer_id: parseInt(customerId, 10),
-          name: adg.name,
-          status: adg.status
-        });
-        allAdgroupIds.push(adg.nccAdgroupId);
+      if (totalDays < 0 || totalDays > 31) {
+        throw new Error('Invalid date range');
+      }
 
-        // Fetch Ads
-        let ads: any[] = [];
-        try {
-          ads = await makeNaverRequest('/ncc/ads', 'GET', customerId, `nccAdgroupId=${adg.nccAdgroupId}`);
-        } catch (err) {
-          console.error(`Failed to fetch ads for adgroup ${adg.nccAdgroupId}`);
-          continue;
+      // --- CHECK ALREADY SYNCED DATES ---
+      let syncedDateSet = new Set<string>();
+      if (!force) {
+        const { data: alreadySynced } = await supabaseAdmin
+          .from('synced_dates')
+          .select('synced_date')
+          .eq('customer_id', customerIdInt)
+          .gte('synced_date', startDateStr)
+          .lte('synced_date', endDateStr);
+
+        syncedDateSet = new Set(alreadySynced?.map((d: any) => d.synced_date) || []);
+      }
+      
+      const datesToSync: string[] = [];
+      for (let d = 0; d <= totalDays; d++) {
+        const dateStr = format(addDays(start, d), 'yyyy-MM-dd');
+        if (!syncedDateSet.has(dateStr)) {
+          datesToSync.push(dateStr);
         }
+      }
 
-        if (!Array.isArray(ads)) continue;
+      if (datesToSync.length === 0) {
+        console.log(`[Background Sync] All dates already synced for customer ${customerId}`);
+        activeSyncs.set(customerId, { status: 'success' });
+        return;
+      }
 
-        for (const adObj of ads) {
-          await supabaseAdmin.from('ads').upsert({
-            ncc_ad_id: adObj.nccAdId,
-            ncc_adgroup_id: adg.nccAdgroupId,
-            ncc_campaign_id: camp.nccCampaignId,
-            customer_id: parseInt(customerId, 10),
-            name: getAdName(adObj),
-            type: adObj.type,
-            image_url: getAdImageUrl(adObj),
-            status: adObj.status
-          });
-          allAdIds.push(adObj.nccAdId);
-        }
+      console.log(`[Background Sync] Need to sync dates: ${datesToSync.join(', ')}`);
 
-        // Fetch Keywords for this Ad Group
-        let keywords: any[] = [];
-        try {
-          keywords = await makeNaverRequest('/ncc/keywords', 'GET', customerId, `nccAdgroupId=${adg.nccAdgroupId}`);
-        } catch (err) {
-          console.error(`Failed to fetch keywords for adgroup ${adg.nccAdgroupId}`);
-        }
+      let runFullHierarchySync = syncHierarchy;
 
-        if (Array.isArray(keywords)) {
-          for (const kw of keywords) {
-            await supabaseAdmin.from('keywords').upsert({
-              ncc_keyword_id: kw.nccKeywordId,
-              ncc_adgroup_id: adg.nccAdgroupId,
-              ncc_campaign_id: camp.nccCampaignId,
-              customer_id: parseInt(customerId, 10),
-              keyword: kw.keyword,
-              status: kw.status
-            });
-            allKeywordIds.push(kw.nccKeywordId);
+      let campaigns: any[] = [];
+      let allCampaignIds: string[] = [];
+      let allAdgroupIds: string[] = [];
+      let allAdIds: string[] = [];
+      let allKeywordIds: string[] = [];
+
+      if (!runFullHierarchySync) {
+        console.log(`[Background Sync] stats-only sync requested. Checking database for existing hierarchy...`);
+        
+        // Fetch campaigns from database
+        const { data: dbCampaigns, error: campErr } = await supabaseAdmin
+          .from('campaigns')
+          .select('ncc_campaign_id, name, status')
+          .eq('customer_id', customerIdInt);
+        
+        if (campErr || !dbCampaigns || dbCampaigns.length === 0) {
+          console.log(`[Background Sync] No existing campaigns in database for customer ${customerId}. Falling back to full hierarchy sync.`);
+          runFullHierarchySync = true;
+        } else {
+          campaigns = dbCampaigns.map(c => ({
+            nccCampaignId: c.ncc_campaign_id,
+            name: c.name,
+            status: c.status
+          }));
+          allCampaignIds = campaigns.map(c => c.nccCampaignId);
+
+          // Fetch existing adgroups
+          const { data: dbAdGroups, error: adgErr } = await supabaseAdmin
+            .from('ad_groups')
+            .select('ncc_adgroup_id')
+            .eq('customer_id', customerIdInt);
+          
+          if (adgErr || !dbAdGroups || dbAdGroups.length === 0) {
+            console.log(`[Background Sync] No existing ad groups in database for customer ${customerId}. Falling back to full hierarchy sync.`);
+            runFullHierarchySync = true;
+          } else {
+            allAdgroupIds = dbAdGroups.map(a => a.ncc_adgroup_id);
+
+            // Fetch existing ads
+            const { data: dbAds } = await supabaseAdmin
+              .from('ads')
+              .select('ncc_ad_id')
+              .eq('customer_id', customerIdInt);
+            allAdIds = dbAds?.map(a => a.ncc_ad_id) || [];
+
+            // Fetch existing keywords
+            const { data: dbKeywords } = await supabaseAdmin
+              .from('keywords')
+              .select('ncc_keyword_id')
+              .eq('customer_id', customerIdInt);
+            allKeywordIds = dbKeywords?.map(k => k.ncc_keyword_id) || [];
+
+            console.log(`[Background Sync] Database hierarchy loaded: ${allCampaignIds.length} campaigns, ${allAdgroupIds.length} adgroups, ${allAdIds.length} ads, ${allKeywordIds.length} keywords`);
           }
         }
       }
-    }
 
-    // 3. Fetch and upsert stats for target dates in batches
-    for (const dateStr of datesToSync) {
-      console.log(`Syncing stats for date: ${dateStr}...`);
+      if (runFullHierarchySync) {
+        console.log(`[Background Sync] Running full hierarchy sync from Naver API...`);
 
-      // Campaign stats
-      const campStats = await fetchStatsInBatchesForDate(allCampaignIds, customerId, dateStr, 'campaign');
-      if (campStats.length > 0) {
-        await supabaseAdmin.from('campaign_stats').upsert(campStats, { onConflict: 'ncc_campaign_id, stat_date' });
-      }
+        // 1. Fetch campaigns for this customer
+        campaigns = await makeNaverRequest('/ncc/campaigns', 'GET', customerId, undefined, customKeys);
 
-      // Ad Group stats
-      const adgStats = await fetchStatsInBatchesForDate(allAdgroupIds, customerId, dateStr, 'adgroup');
-      if (adgStats.length > 0) {
-        await supabaseAdmin.from('ad_group_stats').upsert(adgStats, { onConflict: 'ncc_adgroup_id, stat_date' });
-      }
+        if (!Array.isArray(campaigns) || campaigns.length === 0) {
+          console.log(`[Background Sync] No campaigns found for customer ${customerId}`);
+          activeSyncs.set(customerId, { status: 'success' });
+          return;
+        }
 
-      // Ad stats
-      const adStats = await fetchStatsInBatchesForDate(allAdIds, customerId, dateStr, 'ad');
-      if (adStats.length > 0) {
-        await supabaseAdmin.from('ad_stats').upsert(adStats, { onConflict: 'ncc_ad_id, stat_date' });
-      }
+        allCampaignIds = campaigns.map(c => c.nccCampaignId);
 
-      // Keyword stats
-      if (allKeywordIds.length > 0) {
-        const kwStats = await fetchStatsInBatchesForDate(allKeywordIds, customerId, dateStr, 'keyword');
-        if (kwStats.length > 0) {
-          await supabaseAdmin.from('keyword_stats').upsert(kwStats, { onConflict: 'ncc_keyword_id, stat_date' });
+        // Upsert Campaigns in batch
+        const campaignRows = campaigns.map(camp => ({
+          ncc_campaign_id: camp.nccCampaignId,
+          customer_id: customerIdInt,
+          name: camp.name,
+          status: camp.status
+        }));
+        await supabaseAdmin.from('campaigns').upsert(campaignRows);
+
+        // 2. Fetch Ad Groups for all campaigns concurrently
+        console.log(`[Background Sync] Fetching adgroups for ${campaigns.length} campaigns (concurrency = 1, delay = 100ms)...`);
+        const adgroupsResults = await mapConcurrent(campaigns, 1, 100, async (camp) => {
+          try {
+            return await makeNaverRequest('/ncc/adgroups', 'GET', customerId, `nccCampaignId=${camp.nccCampaignId}`, customKeys);
+          } catch (err) {
+            console.error(`Failed to fetch adgroups for campaign ${camp.nccCampaignId}:`, err);
+            return [];
+          }
+        });
+        const adgroups = adgroupsResults.flat();
+        allAdgroupIds = adgroups.map(a => a.nccAdgroupId);
+
+        // Upsert Ad Groups in batch
+        if (adgroups.length > 0) {
+          const adgroupRows = adgroups.map(adg => ({
+            ncc_adgroup_id: adg.nccAdgroupId,
+            ncc_campaign_id: adg.nccCampaignId,
+            customer_id: customerIdInt,
+            name: adg.name,
+            status: adg.status
+          }));
+          await supabaseAdmin.from('ad_groups').upsert(adgroupRows);
+        }
+
+        // 3. Fetch Ads and Keywords for all adgroups concurrently
+        let ads: any[] = [];
+        let keywords: any[] = [];
+
+        if (adgroups.length > 0) {
+          console.log(`[Background Sync] Fetching ads and keywords for ${adgroups.length} adgroups (concurrency = 1, delay = 100ms)...`);
+          
+          const adsResults = await mapConcurrent(adgroups, 1, 100, async (adg) => {
+            try {
+              return await makeNaverRequest('/ncc/ads', 'GET', customerId, `nccAdgroupId=${adg.nccAdgroupId}`, customKeys);
+            } catch (err) {
+              console.error(`Failed to fetch ads for adgroup ${adg.nccAdgroupId}:`, err);
+              return [];
+            }
+          });
+          ads = adsResults.flat();
+          ads.forEach(ad => allAdIds.push(ad.nccAdId));
+
+          const keywordsResults = await mapConcurrent(adgroups, 1, 100, async (adg) => {
+            try {
+              return await makeNaverRequest('/ncc/keywords', 'GET', customerId, `nccAdgroupId=${adg.nccAdgroupId}`, customKeys);
+            } catch (err) {
+              console.error(`Failed to fetch keywords for adgroup ${adg.nccAdgroupId}:`, err);
+              return [];
+            }
+          });
+          keywords = keywordsResults.flat();
+          keywords.forEach(kw => allKeywordIds.push(kw.nccKeywordId));
+
+          // Batch Upsert Ads
+          if (ads.length > 0) {
+            const adRows = ads.map(adObj => {
+              const parentAdg = adgroups.find(ag => ag.nccAdgroupId === adObj.nccAdgroupId);
+              return {
+                ncc_ad_id: adObj.nccAdId,
+                ncc_adgroup_id: adObj.nccAdgroupId,
+                ncc_campaign_id: parentAdg ? parentAdg.nccCampaignId : '',
+                customer_id: customerIdInt,
+                name: getAdName(adObj),
+                type: adObj.type,
+                image_url: getAdImageUrl(adObj),
+                status: adObj.status
+              };
+            });
+            await supabaseAdmin.from('ads').upsert(adRows);
+          }
+
+          // Batch Upsert Keywords
+          if (keywords.length > 0) {
+            const keywordRows = keywords.map(kw => {
+              const parentAdg = adgroups.find(ag => ag.nccAdgroupId === kw.nccAdgroupId);
+              return {
+                ncc_keyword_id: kw.nccKeywordId,
+                ncc_adgroup_id: kw.nccAdgroupId,
+                ncc_campaign_id: parentAdg ? parentAdg.nccCampaignId : '',
+                customer_id: customerIdInt,
+                keyword: kw.keyword,
+                status: kw.status
+              };
+            });
+            await supabaseAdmin.from('keywords').upsert(keywordRows);
+          }
         }
       }
+
+      // 4. Fetch and upsert stats for target dates in batches
+      for (const dateStr of datesToSync) {
+        console.log(`[Background Sync] Syncing stats for date: ${dateStr}...`);
+
+        // Campaign stats
+        if (allCampaignIds.length > 0) {
+          const campStats = await fetchStatsInBatchesForDate(allCampaignIds, customerId, dateStr, 'campaign', customKeys);
+          if (campStats.length > 0) {
+            await supabaseAdmin.from('campaign_stats').upsert(campStats, { onConflict: 'ncc_campaign_id, stat_date' });
+          }
+        }
+
+        // Ad Group stats
+        if (allAdgroupIds.length > 0) {
+          const adgStats = await fetchStatsInBatchesForDate(allAdgroupIds, customerId, dateStr, 'adgroup', customKeys);
+          if (adgStats.length > 0) {
+            await supabaseAdmin.from('ad_group_stats').upsert(adgStats, { onConflict: 'ncc_adgroup_id, stat_date' });
+          }
+        }
+
+        // Ad stats
+        if (allAdIds.length > 0) {
+          const adStats = await fetchStatsInBatchesForDate(allAdIds, customerId, dateStr, 'ad', customKeys);
+          if (adStats.length > 0) {
+            await supabaseAdmin.from('ad_stats').upsert(adStats, { onConflict: 'ncc_ad_id, stat_date' });
+          }
+        }
+
+        // Keyword stats
+        if (allKeywordIds.length > 0) {
+          const kwStats = await fetchStatsInBatchesForDate(allKeywordIds, customerId, dateStr, 'keyword', customKeys);
+          if (kwStats.length > 0) {
+            await supabaseAdmin.from('keyword_stats').upsert(kwStats, { onConflict: 'ncc_keyword_id, stat_date' });
+          }
+        }
+      }
+
+      // 5. Save synced dates to avoid duplicate fetches in the future
+      const syncedDatesRows = datesToSync.map(d => ({
+        customer_id: customerIdInt,
+        synced_date: d
+      }));
+      await supabaseAdmin.from('synced_dates').upsert(syncedDatesRows, { onConflict: 'customer_id, synced_date' });
+
+      console.log(`[Background Sync] Successfully completed for customer ${customerId}`);
+      activeSyncs.set(customerId, { status: 'success' });
+    } catch (err: any) {
+      console.error(`[Background Sync] Error for customer ${customerId}:`, err);
+      activeSyncs.set(customerId, { status: 'failed', error: err.message });
     }
+  })();
 
-    // 4. Save synced dates to avoid duplicate fetches in the future
-    const syncedDatesRows = datesToSync.map(d => ({
-      customer_id: parseInt(customerId, 10),
-      synced_date: d
-    }));
-    await supabaseAdmin.from('synced_dates').upsert(syncedDatesRows, { onConflict: 'customer_id, synced_date' });
-
-    return NextResponse.json({ success: true, message: `Synced data for ${datesToSync.length} dates` });
-  } catch (error: any) {
-    console.error('On-demand Sync Error:', error);
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
-  }
+  return NextResponse.json({ success: true, message: 'Sync started in background', status: 'running' });
 }

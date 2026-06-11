@@ -5,9 +5,15 @@ export function generateSignature(timestamp: string, method: string, uri: string
   return crypto.createHmac('sha256', secretKey).update(message).digest('base64');
 }
 
-export async function makeNaverRequest(uri: string, method: string, customerId: string, queryParams?: string) {
-  const apiKey = process.env.NAVER_API_KEY!;
-  const secretKey = process.env.NAVER_SECRET_KEY!;
+export async function makeNaverRequest(
+  uri: string, 
+  method: string, 
+  customerId: string, 
+  queryParams?: string,
+  customKeys?: { apiKey: string; secretKey: string }
+) {
+  const apiKey = customKeys?.apiKey || process.env.NAVER_API_KEY!;
+  const secretKey = customKeys?.secretKey || process.env.NAVER_SECRET_KEY!;
   const baseUrl = 'https://api.searchad.naver.com';
 
   const timestamp = Date.now().toString();

@@ -112,7 +112,12 @@ async function fetchStatsInBatches(ids, customerId, statDateStr, entityType) {
 
 async function runSync() {
   const customerId = process.env.NAVER_CUSTOMER_ID;
-  console.log(`Starting sync for master customer ID: ${customerId}`);
+  const targetCustomerId = process.argv[2];
+  if (targetCustomerId) {
+    console.log(`Starting sync for target customer ID: ${targetCustomerId}`);
+  } else {
+    console.log(`Starting sync for master customer ID: ${customerId}`);
+  }
   
   const managerRes = await makeNaverRequest('/manager-accounts', 'GET', customerId);
   let managerIds = [];
@@ -149,6 +154,9 @@ async function runSync() {
     if (childAccounts.length === 0) continue;
 
     for (const account of childAccounts) {
+      if (targetCustomerId && account.customerId.toString() !== targetCustomerId) {
+        continue;
+      }
       console.log(`Syncing child account: ${account.adAccountName} (${account.customerId})`);
       await supabaseAdmin.from('ad_accounts').upsert({
         customer_id: account.customerId,

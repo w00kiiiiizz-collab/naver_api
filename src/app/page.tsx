@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useMemo, Fragment } from 'react';
 import { supabase } from '@/lib/supabaseClient';
+import { useRouter } from 'next/navigation';
 import { 
   BarChart3, 
   Users, 
@@ -22,7 +23,9 @@ import {
   ChevronsUpDown,
   ChevronUp,
   Maximize2,
-  Minimize2
+  Minimize2,
+  Settings,
+  LogOut
 } from 'lucide-react';
 import { format, subDays, parseISO, subMonths, startOfMonth, endOfMonth, addDays, differenceInDays } from 'date-fns';
 
@@ -75,7 +78,28 @@ const formatMetricValue = (key: string, value: number) => {
   return Math.round(value).toLocaleString();
 };
 
+const managerFallbackMap: Record<number | string, string> = {
+  44851: '이정민',
+  44865: '이수정',
+  41264: '홍수정',
+  38270: '박상민',
+  38271: '김용덕',
+  29271: '최혜림',
+  29621: '엄도윤',
+  27205: '김상욱',
+  27195: '9팀',
+  2769: '김상욱'
+};
+
 export default function Home() {
+  const router = useRouter();
+  const [userProfile, setUserProfile] = useState<any | null>(null);
+  const [checkingAuth, setCheckingAuth] = useState(true);
+
+  // User profiles list for admin management
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [profilesList, setProfilesList] = useState<any[]>([]);
+
   const [accounts, setAccounts] = useState<any[]>([]);
   const [selectedAccount, setSelectedAccount] = useState<any | null>(null);
   
@@ -89,6 +113,9 @@ export default function Home() {
   const [syncing, setSyncing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [dbError, setDbError] = useState<string | null>(null);
+  const [syncTime, setSyncTime] = useState<number>(0);
+  const [syncMessage, setSyncMessage] = useState<string>('');
+  const [syncHierarchy, setSyncHierarchy] = useState<boolean>(false);
   
   // Custom theme selector ('dark' | 'light')
   const [theme, setTheme] = useState<'light' | 'dark'>('dark');
@@ -119,18 +146,56 @@ export default function Home() {
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
 
+  // 0. Authentication and Profile loading
+  useEffect(() => {
+    async function checkAuth() {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        router.push('/login');
+        return;
+      }
+
+      // Fetch user profile
+      const { data: profile } = await supabase
+        .from('user_profiles')
+        .select('*')
+        .eq('id', session.user.id)
+        .single();
+      
+      setUserProfile(profile || { id: session.user.id, email: session.user.email, role: 'manager' });
+      setCheckingAuth(false);
+    }
+    checkAuth();
+  }, [router]);
+
   // 1. Load accounts
   useEffect(() => {
     async function loadAccounts() {
-      const { data, error } = await supabase.from('ad_accounts').select('*').order('ad_account_name');
+      if (!userProfile) return;
+      
+      let query = supabase.from('ad_accounts').select('*');
+      
+      // If user is a manager, only query their assigned accounts
+      if (userProfile.role === 'manager' && userProfile.manager_account_no) {
+        query = query.eq('manager_account_no', userProfile.manager_account_no);
+      }
+      
+      const { data, error } = await query.order('ad_account_name');
       if (data) {
         setAccounts(data);
-        if (data.length > 0) setSelectedAccount(data[0]);
+        if (data.length > 0) {
+          setSelectedAccount(data[0]);
+        } else {
+          setSelectedAccount(null);
+        }
+      } else {
+        setAccounts([]);
+        setSelectedAccount(null);
       }
       setLoading(false);
     }
     loadAccounts();
-  }, []);
+  }, [userProfile]);
 
   // Filter accounts by search query
   const filteredAccounts = useMemo(() => {
@@ -492,23 +557,103 @@ export default function Home() {
     setHoveredIndex(null);
   };
 
-  // 7. On-Demand Sync for Date Range
+  // 7. On-Demand Sync for Date Range with Polling
   async function handleSync() {
     if (!selectedAccount) return;
     setSyncing(true);
+    setSyncTime(0);
+    setSyncMessage('동기화 요청 중...');
+
+    // Timer to track elapsed time
+    const timerInterval = setInterval(() => {
+      setSyncTime(prev => prev + 1);
+    }, 1000);
+
     try {
-      const res = await fetch(`/api/stats/sync?customerId=${selectedAccount.customer_id}&startDate=${startDate}&endDate=${endDate}`);
+      // 1. Trigger the background sync
+      const res = await fetch(`/api/stats/sync?customerId=${selectedAccount.customer_id}&startDate=${startDate}&endDate=${endDate}&force=true&syncHierarchy=${syncHierarchy}`);
       const result = await res.json();
-      if (result.success) {
-        await loadData();
-      } else {
-        alert('동기화 실패: ' + result.error);
+      
+      if (!result.success) {
+        clearInterval(timerInterval);
+        alert('동기화 요청 실패: ' + result.error);
+        setSyncing(false);
+        return;
       }
+
+      setSyncMessage('백그라운드 동기화 중... 데이터가 많으면 수 분 정도 걸릴 수 있습니다.');
+
+      // 2. Poll for status
+      const pollInterval = setInterval(async () => {
+        try {
+          const statusRes = await fetch(`/api/stats/sync?customerId=${selectedAccount.customer_id}&status=true`);
+          const statusData = await statusRes.json();
+          
+          if (statusData.success) {
+            if (statusData.status === 'success') {
+              clearInterval(timerInterval);
+              clearInterval(pollInterval);
+              setSyncMessage('');
+              setSyncing(false);
+              await loadData();
+            } else if (statusData.status === 'failed') {
+              clearInterval(timerInterval);
+              clearInterval(pollInterval);
+              setSyncMessage('');
+              setSyncing(false);
+              alert('동기화 실패: ' + (statusData.error || '알 수 없는 오류가 발생했습니다.'));
+            }
+          }
+        } catch (pollErr) {
+          console.error('Polling error:', pollErr);
+        }
+      }, 3000);
+
     } catch (err) {
+      clearInterval(timerInterval);
       alert('오류가 발생했습니다.');
+      setSyncing(false);
     }
-    setSyncing(false);
   }
+
+  // 7.5. Profile settings & Logout & Admin User Management
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    router.push('/login');
+  };
+
+  const loadProfilesList = async () => {
+    if (userProfile?.role !== 'admin') return;
+    const { data } = await supabase.from('user_profiles').select('*').order('email');
+    if (data) {
+      setProfilesList(data);
+    }
+  };
+
+  useEffect(() => {
+    if (showSettingsModal && userProfile?.role === 'admin') {
+      loadProfilesList();
+    }
+  }, [showSettingsModal, userProfile]);
+
+  const handleUpdateProfile = async (id: string, updatedRole: string, updatedManagerNo: number | string) => {
+    const managerNoVal = updatedManagerNo === '' || updatedManagerNo === 'none' ? null : parseInt(updatedManagerNo.toString(), 10);
+    const { error } = await supabase
+      .from('user_profiles')
+      .update({ role: updatedRole, manager_account_no: managerNoVal })
+      .eq('id', id);
+    
+    if (error) {
+      alert('설정 저장 실패: ' + error.message);
+    } else {
+      alert('설정이 성공적으로 저장되었습니다.');
+      loadProfilesList();
+      // If updating current user's profile, update the local userProfile state too
+      if (id === userProfile.id) {
+        setUserProfile((prev: any) => ({ ...prev, role: updatedRole, manager_account_no: managerNoVal }));
+      }
+    }
+  };
 
   const toggleCampaign = (id: string) => {
     setExpandedCampaigns(prev => ({ ...prev, [id]: !prev[id] }));
@@ -569,8 +714,8 @@ export default function Home() {
         onClick={() => handleSort(field)}
         className={`px-2 py-3 hover:bg-neutral-800/50 hover:text-white cursor-pointer select-none transition-colors border-r border-neutral-900/10 ${widthClass} ${textRight ? 'text-right' : ''}`}
       >
-        <div className={`flex items-center gap-1 ${textRight ? 'justify-end' : ''}`}>
-          <span>{label}</span>
+        <div className={`flex items-center gap-1 whitespace-nowrap ${textRight ? 'justify-end' : ''}`}>
+          <span className="whitespace-nowrap">{label}</span>
           <span className="text-[9px] text-neutral-500">
             {isSorted ? (sortOrder === 'asc' ? '▲' : '▼') : <ChevronsUpDown size={9} />}
           </span>
@@ -578,6 +723,48 @@ export default function Home() {
       </th>
     );
   };
+
+  if (checkingAuth) {
+    return (
+      <div className="min-h-screen bg-neutral-900 flex flex-col items-center justify-center text-neutral-400 font-sans">
+        <RefreshCw className="animate-spin text-blue-500 mb-3" size={24} />
+        <p className="text-xs font-semibold">인증 확인 중...</p>
+      </div>
+    );
+  }
+
+  if (userProfile?.role === 'pending') {
+    return (
+      <div className="min-h-screen bg-neutral-900 flex flex-col items-center justify-center text-neutral-400 font-sans p-4 relative overflow-hidden">
+        {/* Background glow effects */}
+        <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-blue-600/10 rounded-full blur-3xl pointer-events-none animate-pulse"></div>
+        <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-indigo-600/10 rounded-full blur-3xl pointer-events-none animate-pulse"></div>
+
+        <div className="w-full max-w-md bg-neutral-950 border border-neutral-850 rounded-2xl shadow-2xl p-8 text-center relative z-10 backdrop-blur-md">
+          <div className="w-16 h-16 rounded-full bg-amber-500/10 flex items-center justify-center mx-auto mb-6">
+            <AlertCircle className="text-amber-500" size={32} />
+          </div>
+          <h2 className="text-lg font-bold text-white mb-2">승인 대기 중</h2>
+          <p className="text-neutral-400 text-xs leading-relaxed mb-6">
+            회원가입 요청이 접수되었습니다.<br />
+            관리자 승인 후에 서비스를 이용하실 수 있습니다. 잠시만 기다려 주세요!
+          </p>
+          <div className="flex flex-col gap-2">
+            <div className="px-4 py-3 bg-neutral-900/60 border border-neutral-850 rounded-xl text-left text-[11px] text-neutral-400 break-all space-y-1">
+              <div><strong>계정 이메일:</strong> {userProfile.email}</div>
+              {userProfile.naver_customer_id && <div><strong>네이버 광고주 ID:</strong> {userProfile.naver_customer_id}</div>}
+            </div>
+            <button
+              onClick={handleLogout}
+              className="w-full mt-4 py-2.5 bg-neutral-850 hover:bg-neutral-800 text-white font-bold rounded-xl shadow-lg transition-all text-xs cursor-pointer flex items-center justify-center gap-1.5"
+            >
+              로그아웃 <LogOut size={13} />
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={`flex h-screen overflow-hidden text-xs antialiased font-sans transition-colors duration-300 ${
@@ -642,11 +829,60 @@ export default function Home() {
                 {isSelected && (
                   <div className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-4 bg-blue-500 rounded-r-md"></div>
                 )}
-                <Users size={12} className={isSelected ? "text-blue-500" : "text-neutral-500"} />
-                <span className="truncate">{acc.ad_account_name}</span>
+                <Users size={12} className={`flex-shrink-0 ${isSelected ? "text-blue-500" : "text-neutral-500"}`} />
+                <div className="min-w-0 flex-1 flex flex-col text-left">
+                  <span className="truncate w-full">{acc.ad_account_name}</span>
+                  <span className={`text-[8.5px] mt-0.5 font-normal truncate ${
+                    isSelected ? 'text-blue-400/80' : 'text-neutral-500'
+                  }`}>
+                    담당자: {acc.manager_name || managerFallbackMap[acc.manager_account_no] || '미지정'}
+                  </span>
+                </div>
               </button>
             );
           })}
+        </div>
+
+        {/* Sidebar Footer */}
+        <div className={`p-3 border-t flex items-center justify-between gap-2 transition-colors duration-300 ${
+          theme === 'dark' ? 'border-neutral-900 bg-neutral-950/30' : 'border-gray-150 bg-gray-50/50'
+        }`}>
+          <div className="min-w-0 flex-1">
+            <p className={`font-semibold truncate text-[10px] ${theme === 'dark' ? 'text-white' : 'text-neutral-900'}`}>
+              {userProfile?.email}
+            </p>
+            <p className="text-[8.5px] text-neutral-500 font-semibold mt-0.5 uppercase tracking-wider">
+              {userProfile?.role === 'admin' 
+                ? '관리자 (Admin)' 
+                : `담당: ${managerFallbackMap[userProfile?.manager_account_no] || '미배정'}`}
+            </p>
+          </div>
+          
+          <div className="flex items-center gap-1 flex-shrink-0">
+            <button
+              onClick={() => setShowSettingsModal(true)}
+              className={`p-1.5 rounded-lg border transition-colors cursor-pointer ${
+                theme === 'dark'
+                  ? 'bg-neutral-900 border-neutral-850 hover:bg-neutral-800 text-neutral-400 hover:text-white'
+                  : 'bg-white border-gray-200 hover:bg-gray-50 text-neutral-600 hover:text-neutral-950'
+              }`}
+              title="계정 및 사용자 설정"
+            >
+              <Settings size={12} />
+            </button>
+            
+            <button
+              onClick={handleLogout}
+              className={`p-1.5 rounded-lg border transition-colors cursor-pointer ${
+                theme === 'dark'
+                  ? 'bg-neutral-900 border-neutral-850 hover:bg-neutral-800 text-red-400 hover:text-red-300'
+                  : 'bg-white border-gray-200 hover:bg-gray-50 text-red-600 hover:text-red-500'
+              }`}
+              title="로그아웃"
+            >
+              <LogOut size={12} />
+            </button>
+          </div>
         </div>
       </div>
 
@@ -661,6 +897,21 @@ export default function Home() {
               <div>
                 <p className="font-semibold text-red-300">데이터베이스 설정 오류</p>
                 <p className="mt-0.5 text-neutral-400">{dbError}</p>
+              </div>
+            </div>
+          )}
+
+          {/* Sync Progress Status Alert */}
+          {syncing && syncMessage && (
+            <div className={`flex items-start gap-3 p-3 rounded-xl text-[11px] border ${
+              theme === 'dark' 
+                ? 'bg-blue-950/15 border-blue-900/30 text-blue-400' 
+                : 'bg-blue-50 border-blue-200 text-blue-700'
+            }`}>
+              <RefreshCw className="flex-shrink-0 mt-0.5 animate-spin" size={14} />
+              <div>
+                <p className="font-semibold">실시간 동기화 진행 중 ({syncTime}초 경과)</p>
+                <p className="mt-0.5 text-neutral-500">{syncMessage}</p>
               </div>
             </div>
           )}
@@ -738,15 +989,29 @@ export default function Home() {
                 />
               </div>
 
-              {/* Sync Button */}
-              <button 
-                onClick={handleSync}
-                disabled={syncing || !selectedAccount}
-                className="flex items-center gap-1 px-3 py-1 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 disabled:from-blue-800 text-white font-bold rounded-lg shadow-md transition-all text-[10px] cursor-pointer"
-              >
-                <RefreshCw size={10} className={syncing ? "animate-spin" : ""} />
-                {syncing ? '동기화 중' : '동기화'}
-              </button>
+              {/* Sync Controls */}
+              <div className="flex items-center gap-3">
+                <label className="flex items-center gap-1.5 cursor-pointer text-[10px] select-none text-neutral-400 hover:text-neutral-200">
+                  <input
+                    type="checkbox"
+                    checked={syncHierarchy}
+                    onChange={(e) => setSyncHierarchy(e.target.checked)}
+                    disabled={syncing}
+                    className="rounded border-neutral-750 bg-neutral-900 text-blue-500 focus:ring-blue-500/30 focus:ring-offset-neutral-900 focus:ring-2 w-3.5 h-3.5 cursor-pointer disabled:opacity-50"
+                  />
+                  <span className="whitespace-nowrap">신규 구조 갱신 (새 캠페인/키워드 추가 시)</span>
+                </label>
+                
+                {/* Sync Button */}
+                <button 
+                  onClick={handleSync}
+                  disabled={syncing || !selectedAccount}
+                  className="flex items-center gap-1 px-3 py-1 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 disabled:from-blue-800 text-white font-bold rounded-lg shadow-md transition-all text-[10px] cursor-pointer"
+                >
+                  <RefreshCw size={10} className={syncing ? "animate-spin" : ""} />
+                  {syncing ? `동기화 중 (${syncTime}초)` : '동기화'}
+                </button>
+              </div>
 
               {/* Theme Toggle Button */}
               <button 
@@ -1016,14 +1281,14 @@ export default function Home() {
           <div className={`rounded-xl shadow-xl border overflow-hidden ${
             theme === 'dark' ? 'bg-neutral-950 border-neutral-850' : 'bg-white border-gray-200'
           }`}>
-            <div className="w-full">
-              <table className="w-full table-layout-fixed border-collapse text-[11px]">
+            <div className="w-full overflow-x-auto custom-scrollbar">
+              <table className="w-full min-w-[1100px] border-collapse text-[11px]">
                 <thead>
                   <tr className={`border-b text-[10px] uppercase tracking-wider font-bold ${
                     theme === 'dark' ? 'bg-neutral-950 border-neutral-850 text-neutral-500' : 'bg-gray-100 border-gray-200 text-neutral-500'
                   }`}>
-                    <th className="px-3 py-3 text-left w-[24%] border-r border-neutral-900/10">캠페인/그룹/소재/키워드</th>
-                    <th className="px-2 py-3 text-center w-[7%] border-r border-neutral-900/10">상태</th>
+                    <th className="px-3 py-3 text-left w-[24%] border-r border-neutral-900/10 whitespace-nowrap">캠페인/그룹/소재/키워드</th>
+                    <th className="px-2 py-3 text-center w-[7%] border-r border-neutral-900/10 whitespace-nowrap">상태</th>
                     <SortableHeader field="imp_cnt" label="노출수" widthClass="w-[8%]" textRight />
                     <SortableHeader field="clk_cnt" label="클릭수" widthClass="w-[6%]" textRight />
                     <SortableHeader field="ctr" label="클릭률" widthClass="w-[6%]" textRight />
@@ -1069,21 +1334,21 @@ export default function Home() {
                                 <span className="truncate pr-1" title={camp.name}>{camp.name}</span>
                               </div>
                             </td>
-                            <td className="px-2 py-2.5 text-center">
+                            <td className="px-2 py-2.5 text-center whitespace-nowrap">
                               <div className="flex items-center justify-center gap-1">
                                 <span className={`w-1.5 h-1.5 rounded-full ${camp.status === 'ELIGIBLE' ? 'bg-emerald-500 shadow-[0_0_6px_#10b981]' : 'bg-neutral-500'}`}></span>
                                 <span className="text-[10px] text-neutral-500">{camp.status === 'ELIGIBLE' ? '활성' : '중지'}</span>
                               </div>
                             </td>
-                            <td className={`px-2 py-2.5 text-right font-mono ${theme === 'dark' ? 'text-white font-extrabold' : 'text-neutral-900 font-extrabold'}`}>{formatMetricValue('imp_cnt', camp.imp_cnt || 0)}</td>
-                            <td className={`px-2 py-2.5 text-right font-mono ${theme === 'dark' ? 'text-white font-extrabold' : 'text-neutral-900 font-extrabold'}`}>{formatMetricValue('clk_cnt', camp.clk_cnt || 0)}</td>
-                            <td className={`px-2 py-2.5 text-right font-mono ${theme === 'dark' ? 'text-white font-extrabold' : 'text-neutral-900 font-extrabold'}`}>{formatMetricValue('ctr', camp.ctr || 0)}</td>
-                            <td className={`px-2 py-2.5 text-right font-mono ${theme === 'dark' ? 'text-white font-extrabold' : 'text-neutral-900 font-extrabold'}`}>{formatMetricValue('cpc', camp.cpc || 0)}</td>
-                            <td className={`px-2 py-2.5 text-right font-mono ${theme === 'dark' ? 'text-white font-extrabold' : 'text-neutral-900 font-extrabold'}`}>{formatMetricValue('sales_amt', camp.sales_amt || 0)}</td>
-                            <td className={`px-2 py-2.5 text-right font-mono ${theme === 'dark' ? 'text-white font-extrabold' : 'text-neutral-900 font-extrabold'}`}>{formatMetricValue('purchase_ccnt', camp.purchase_ccnt || 0)}</td>
-                            <td className={`px-2 py-2.5 text-right font-mono ${theme === 'dark' ? 'text-white font-extrabold' : 'text-neutral-900 font-extrabold'}`}>{formatMetricValue('purchase_conv_amt', camp.purchase_conv_amt || 0)}</td>
-                            <td className={`px-2 py-2.5 text-right font-mono ${theme === 'dark' ? 'text-white font-extrabold' : 'text-neutral-900 font-extrabold'}`}>{formatMetricValue('purchase_ror', camp.purchase_ror || 0)}</td>
-                            <td className={`px-2 py-2.5 text-right font-mono ${theme === 'dark' ? 'text-white font-extrabold' : 'text-neutral-900 font-extrabold'}`}>{formatMetricValue('cp_conv', camp.cp_conv || 0)}</td>
+                            <td className={`px-2 py-2.5 text-right font-mono whitespace-nowrap ${theme === 'dark' ? 'text-white font-extrabold' : 'text-neutral-900 font-extrabold'}`}>{formatMetricValue('imp_cnt', camp.imp_cnt || 0)}</td>
+                            <td className={`px-2 py-2.5 text-right font-mono whitespace-nowrap ${theme === 'dark' ? 'text-white font-extrabold' : 'text-neutral-900 font-extrabold'}`}>{formatMetricValue('clk_cnt', camp.clk_cnt || 0)}</td>
+                            <td className={`px-2 py-2.5 text-right font-mono whitespace-nowrap ${theme === 'dark' ? 'text-white font-extrabold' : 'text-neutral-900 font-extrabold'}`}>{formatMetricValue('ctr', camp.ctr || 0)}</td>
+                            <td className={`px-2 py-2.5 text-right font-mono whitespace-nowrap ${theme === 'dark' ? 'text-white font-extrabold' : 'text-neutral-900 font-extrabold'}`}>{formatMetricValue('cpc', camp.cpc || 0)}</td>
+                            <td className={`px-2 py-2.5 text-right font-mono whitespace-nowrap ${theme === 'dark' ? 'text-white font-extrabold' : 'text-neutral-900 font-extrabold'}`}>{formatMetricValue('sales_amt', camp.sales_amt || 0)}</td>
+                            <td className={`px-2 py-2.5 text-right font-mono whitespace-nowrap ${theme === 'dark' ? 'text-white font-extrabold' : 'text-neutral-900 font-extrabold'}`}>{formatMetricValue('purchase_ccnt', camp.purchase_ccnt || 0)}</td>
+                            <td className={`px-2 py-2.5 text-right font-mono whitespace-nowrap ${theme === 'dark' ? 'text-white font-extrabold' : 'text-neutral-900 font-extrabold'}`}>{formatMetricValue('purchase_conv_amt', camp.purchase_conv_amt || 0)}</td>
+                            <td className={`px-2 py-2.5 text-right font-mono whitespace-nowrap ${theme === 'dark' ? 'text-white font-extrabold' : 'text-neutral-900 font-extrabold'}`}>{formatMetricValue('purchase_ror', camp.purchase_ror || 0)}</td>
+                            <td className={`px-2 py-2.5 text-right font-mono whitespace-nowrap ${theme === 'dark' ? 'text-white font-extrabold' : 'text-neutral-900 font-extrabold'}`}>{formatMetricValue('cp_conv', camp.cp_conv || 0)}</td>
                           </tr>
 
                           {/* Ad Groups under Campaign */}
@@ -1116,21 +1381,21 @@ export default function Home() {
                                       <span className="truncate pr-1" title={adg.name}>{adg.name}</span>
                                     </div>
                                   </td>
-                                  <td className="px-2 py-2 text-center">
+                                  <td className="px-2 py-2 text-center whitespace-nowrap">
                                     <div className="flex items-center justify-center gap-1">
                                       <span className={`w-1.5 h-1.5 rounded-full ${adg.status === 'ELIGIBLE' ? 'bg-emerald-500/80 shadow-[0_0_4px_#10b981]' : 'bg-neutral-600'}`}></span>
                                       <span className="text-[10px] text-neutral-500">{adg.status === 'ELIGIBLE' ? '활성' : '중지'}</span>
                                     </div>
                                   </td>
-                                  <td className="px-2 py-2 text-right font-mono font-extrabold">{formatMetricValue('imp_cnt', adg.imp_cnt || 0)}</td>
-                                  <td className="px-2 py-2 text-right font-mono font-extrabold">{formatMetricValue('clk_cnt', adg.clk_cnt || 0)}</td>
-                                  <td className="px-2 py-2 text-right font-mono font-extrabold">{formatMetricValue('ctr', adg.ctr || 0)}</td>
-                                  <td className="px-2 py-2 text-right font-mono font-extrabold">{formatMetricValue('cpc', adg.cpc || 0)}</td>
-                                  <td className="px-2 py-2 text-right font-mono font-extrabold">{formatMetricValue('sales_amt', adg.sales_amt || 0)}</td>
-                                  <td className="px-2 py-2 text-right font-mono font-extrabold">{formatMetricValue('purchase_ccnt', adg.purchase_ccnt || 0)}</td>
-                                  <td className="px-2 py-2 text-right font-mono font-extrabold">{formatMetricValue('purchase_conv_amt', adg.purchase_conv_amt || 0)}</td>
-                                  <td className="px-2 py-2 text-right font-mono font-extrabold">{formatMetricValue('purchase_ror', adg.purchase_ror || 0)}</td>
-                                  <td className="px-2 py-2 text-right font-mono font-extrabold">{formatMetricValue('cp_conv', adg.cp_conv || 0)}</td>
+                                  <td className="px-2 py-2 text-right font-mono font-extrabold whitespace-nowrap">{formatMetricValue('imp_cnt', adg.imp_cnt || 0)}</td>
+                                  <td className="px-2 py-2 text-right font-mono font-extrabold whitespace-nowrap">{formatMetricValue('clk_cnt', adg.clk_cnt || 0)}</td>
+                                  <td className="px-2 py-2 text-right font-mono font-extrabold whitespace-nowrap">{formatMetricValue('ctr', adg.ctr || 0)}</td>
+                                  <td className="px-2 py-2 text-right font-mono font-extrabold whitespace-nowrap">{formatMetricValue('cpc', adg.cpc || 0)}</td>
+                                  <td className="px-2 py-2 text-right font-mono font-extrabold whitespace-nowrap">{formatMetricValue('sales_amt', adg.sales_amt || 0)}</td>
+                                  <td className="px-2 py-2 text-right font-mono font-extrabold whitespace-nowrap">{formatMetricValue('purchase_ccnt', adg.purchase_ccnt || 0)}</td>
+                                  <td className="px-2 py-2 text-right font-mono font-extrabold whitespace-nowrap">{formatMetricValue('purchase_conv_amt', adg.purchase_conv_amt || 0)}</td>
+                                  <td className="px-2 py-2 text-right font-mono font-extrabold whitespace-nowrap">{formatMetricValue('purchase_ror', adg.purchase_ror || 0)}</td>
+                                  <td className="px-2 py-2 text-right font-mono font-extrabold whitespace-nowrap">{formatMetricValue('cp_conv', adg.cp_conv || 0)}</td>
                                 </tr>
 
                                 {/* Ads (Creatives) under Ad Group */}
@@ -1162,21 +1427,21 @@ export default function Home() {
                                         <span className="truncate pr-1" title={ad.name}>{ad.name}</span>
                                       </div>
                                     </td>
-                                    <td className="px-2 py-1.5 text-center">
+                                    <td className="px-2 py-1.5 text-center whitespace-nowrap">
                                       <div className="flex items-center justify-center gap-1">
                                         <span className={`w-1 h-1 rounded-full ${ad.status === 'ELIGIBLE' ? 'bg-emerald-500/60' : 'bg-neutral-700'}`}></span>
                                         <span className="text-[9px] text-neutral-500">{ad.status === 'ELIGIBLE' ? '활성' : '중지'}</span>
                                       </div>
                                     </td>
-                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('imp_cnt', ad.imp_cnt || 0)}</td>
-                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('clk_cnt', ad.clk_cnt || 0)}</td>
-                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('ctr', ad.ctr || 0)}</td>
-                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('cpc', ad.cpc || 0)}</td>
-                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('sales_amt', ad.sales_amt || 0)}</td>
-                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('purchase_ccnt', ad.purchase_ccnt || 0)}</td>
-                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('purchase_conv_amt', ad.purchase_conv_amt || 0)}</td>
-                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('purchase_ror', ad.purchase_ror || 0)}</td>
-                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('cp_conv', ad.cp_conv || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('imp_cnt', ad.imp_cnt || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('clk_cnt', ad.clk_cnt || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('ctr', ad.ctr || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('cpc', ad.cpc || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('sales_amt', ad.sales_amt || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('purchase_ccnt', ad.purchase_ccnt || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('purchase_conv_amt', ad.purchase_conv_amt || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('purchase_ror', ad.purchase_ror || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('cp_conv', ad.cp_conv || 0)}</td>
                                   </tr>
                                 ))}
 
@@ -1199,21 +1464,21 @@ export default function Home() {
                                         <span className={`text-[7px] px-1 rounded flex-shrink-0 ${theme === 'dark' ? 'bg-neutral-800 text-neutral-400' : 'bg-gray-200 text-neutral-600'}`}>키워드</span>
                                       </div>
                                     </td>
-                                    <td className="px-2 py-1.5 text-center">
+                                    <td className="px-2 py-1.5 text-center whitespace-nowrap">
                                       <div className="flex items-center justify-center gap-1">
                                         <span className={`w-1 h-1 rounded-full ${kw.status === 'ELIGIBLE' ? 'bg-emerald-500/60' : 'bg-neutral-700'}`}></span>
                                         <span className="text-[9px] text-neutral-500">{kw.status === 'ELIGIBLE' ? '활성' : '중지'}</span>
                                       </div>
                                     </td>
-                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('imp_cnt', kw.imp_cnt || 0)}</td>
-                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('clk_cnt', kw.clk_cnt || 0)}</td>
-                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('ctr', kw.ctr || 0)}</td>
-                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('cpc', kw.cpc || 0)}</td>
-                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('sales_amt', kw.sales_amt || 0)}</td>
-                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('purchase_ccnt', kw.purchase_ccnt || 0)}</td>
-                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('purchase_conv_amt', kw.purchase_conv_amt || 0)}</td>
-                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('purchase_ror', kw.purchase_ror || 0)}</td>
-                                    <td className="px-2 py-1.5 text-right font-mono">{formatMetricValue('cp_conv', kw.cp_conv || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('imp_cnt', kw.imp_cnt || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('clk_cnt', kw.clk_cnt || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('ctr', kw.ctr || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('cpc', kw.cpc || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('sales_amt', kw.sales_amt || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('purchase_ccnt', kw.purchase_ccnt || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('purchase_conv_amt', kw.purchase_conv_amt || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('purchase_ror', kw.purchase_ror || 0)}</td>
+                                    <td className="px-2 py-1.5 text-right font-mono whitespace-nowrap">{formatMetricValue('cp_conv', kw.cp_conv || 0)}</td>
                                   </tr>
                                 ))}
                               </Fragment>
@@ -1227,9 +1492,108 @@ export default function Home() {
               </table>
             </div>
           </div>
-          
         </div>
       </div>
+
+      {/* Settings Modal Overlay */}
+      {showSettingsModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className={`w-full max-w-2xl rounded-2xl border shadow-2xl overflow-hidden flex flex-col max-h-[85vh] ${
+            theme === 'dark' ? 'bg-neutral-950 border-neutral-850 text-neutral-100' : 'bg-white border-gray-200 text-neutral-800'
+          }`}>
+            {/* Modal Header */}
+            <div className={`px-6 py-4 border-b flex items-center justify-between ${
+              theme === 'dark' ? 'border-neutral-900 bg-neutral-950' : 'border-gray-150 bg-gray-50'
+            }`}>
+              <div className="flex items-center gap-2">
+                <Settings size={16} className="text-blue-500" />
+                <h3 className="text-sm font-bold">대시보드 및 사용자 설정</h3>
+              </div>
+              <button 
+                onClick={() => setShowSettingsModal(false)}
+                className="text-neutral-500 hover:text-neutral-300 text-sm font-semibold cursor-pointer"
+              >
+                닫기
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-6 overflow-y-auto space-y-6 custom-scrollbar text-xs">
+              
+              {/* User Self Info */}
+              <div className="space-y-3">
+                <h4 className="font-bold text-[11px] text-neutral-400 uppercase tracking-wider">내 계정 정보</h4>
+                <div className={`p-4 rounded-xl border space-y-2.5 ${
+                  theme === 'dark' ? 'bg-neutral-900/40 border-neutral-900' : 'bg-gray-50/50 border-gray-150'
+                }`}>
+                  <div className="flex justify-between items-center">
+                    <span className="text-neutral-400">이메일 주소:</span>
+                    <span className="font-semibold">{userProfile?.email}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-neutral-400">계정 역할:</span>
+                    <span className="font-semibold uppercase text-blue-500">
+                      {userProfile?.role === 'admin' 
+                        ? '관리자 (Admin)' 
+                        : userProfile?.role === 'pending'
+                          ? '승인 대기 (Pending)'
+                          : '일반 담당자 (Manager)'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-neutral-400">지정된 네이버 담당 번호:</span>
+                    <span className="font-mono font-semibold">
+                      {userProfile?.manager_account_no 
+                        ? `${userProfile.manager_account_no} (${managerFallbackMap[userProfile.manager_account_no]})`
+                        : '미지정 (전체 광고주가 노출됨)'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Admin User Management */}
+              {userProfile?.role === 'admin' && (
+                <div className="space-y-3 pt-2">
+                  <h4 className="font-bold text-[11px] text-neutral-400 uppercase tracking-wider flex items-center justify-between">
+                    <span>전체 가입자 권한 및 광고주 담당자 매핑 (관리자 전용)</span>
+                    <span className="text-[9px] text-neutral-500 font-normal normal-case">가입된 모든 사용자 목록</span>
+                  </h4>
+                  
+                  <div className={`border rounded-xl overflow-hidden ${
+                    theme === 'dark' ? 'border-neutral-900' : 'border-gray-250'
+                  }`}>
+                    <table className="w-full text-left border-collapse text-[10px]">
+                      <thead>
+                        <tr className={theme === 'dark' ? 'bg-neutral-900 text-neutral-400' : 'bg-gray-50 text-neutral-600'}>
+                          <th className="p-2.5">사용자 이메일</th>
+                          <th className="p-2.5 w-[20%]">역할</th>
+                          <th className="p-2.5 w-[35%]">네이버 광고 담당자 매핑</th>
+                          <th className="p-2.5 w-[15%] text-right">관리</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-neutral-900/40">
+                        {profilesList.map(u => {
+                          const isOwnProfile = u.id === userProfile.id;
+                          return (
+                            <UserRow 
+                              key={u.id}
+                              user={u}
+                              theme={theme}
+                              isOwnProfile={isOwnProfile}
+                              managerFallbackMap={managerFallbackMap}
+                              onSave={handleUpdateProfile}
+                            />
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1283,5 +1647,77 @@ function SummaryCard({
         }`}>{value}</p>
       </div>
     </div>
+  );
+}
+
+function UserRow({ 
+  user, 
+  theme, 
+  isOwnProfile, 
+  managerFallbackMap, 
+  onSave 
+}: { 
+  user: any, 
+  theme: 'light' | 'dark', 
+  isOwnProfile: boolean, 
+  managerFallbackMap: Record<number | string, string>, 
+  onSave: (id: string, role: string, managerNo: number | string) => void 
+}) {
+  const [role, setRole] = useState(user.role || 'pending');
+  const [managerNo, setManagerNo] = useState<number | string>(user.manager_account_no || 'none');
+
+  const hasChanged = role !== (user.role || 'pending') || managerNo !== (user.manager_account_no || 'none');
+
+  return (
+    <tr className={theme === 'dark' ? 'hover:bg-neutral-900/30' : 'hover:bg-gray-50/50'}>
+      <td className="p-2.5 font-semibold">
+        {user.email} {isOwnProfile && <span className="text-[8.5px] text-blue-500 ml-1 font-bold">(나)</span>}
+      </td>
+      <td className="p-2.5">
+        <select
+          value={role}
+          onChange={(e) => setRole(e.target.value)}
+          disabled={isOwnProfile}
+          className={`px-1.5 py-1 rounded border bg-transparent text-[10px] outline-none ${
+            theme === 'dark' ? 'border-neutral-800 text-neutral-200 [color-scheme:dark]' : 'border-gray-200 text-neutral-800'
+          }`}
+        >
+          <option value="pending">승인 대기 (Pending)</option>
+          <option value="manager">일반 (Manager)</option>
+          <option value="admin">관리자 (Admin)</option>
+        </select>
+      </td>
+      <td className="p-2.5">
+        <select
+          value={managerNo}
+          onChange={(e) => setManagerNo(e.target.value)}
+          className={`w-full px-1.5 py-1 rounded border bg-transparent text-[10px] outline-none ${
+            theme === 'dark' ? 'border-neutral-800 text-neutral-200 [color-scheme:dark]' : 'border-gray-200 text-neutral-800'
+          }`}
+        >
+          <option value="none">미지정 (전체 데이터 노출)</option>
+          {Object.entries(managerFallbackMap).map(([no, name]) => (
+            <option key={no} value={no}>
+              {no} - {name}
+            </option>
+          ))}
+        </select>
+      </td>
+      <td className="p-2.5 text-right">
+        <button
+          onClick={() => onSave(user.id, role, managerNo)}
+          disabled={!hasChanged}
+          className={`px-2 py-1 rounded font-bold text-[9px] transition-all cursor-pointer ${
+            hasChanged 
+              ? 'bg-blue-600 hover:bg-blue-500 text-white' 
+              : theme === 'dark' 
+                ? 'bg-neutral-900 text-neutral-600 cursor-not-allowed border border-transparent' 
+                : 'bg-gray-100 text-gray-400 cursor-not-allowed border border-transparent'
+          }`}
+        >
+          저장
+        </button>
+      </td>
+    </tr>
   );
 }
