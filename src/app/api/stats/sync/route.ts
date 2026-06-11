@@ -214,24 +214,56 @@ export async function GET(request: Request) {
       if (!runFullHierarchySync) {
         console.log(`[Background Sync] stats-only sync requested. Checking database for existing hierarchy...`);
         
-        // Fetch campaigns from database
-        const { data: dbCampaigns, error: campErr } = await supabaseAdmin
-          .from('campaigns')
-          .select('ncc_campaign_id, name, status, type')
-          .eq('customer_id', customerIdInt);
-        
-        if (campErr || !dbCampaigns || dbCampaigns.length === 0) {
-          console.log(`[Background Sync] No existing campaigns in database for customer ${customerId}. Falling back to full hierarchy sync.`);
-          runFullHierarchySync = true;
-        } else {
-          campaigns = dbCampaigns.map(c => ({
-            nccCampaignId: c.ncc_campaign_id,
-            name: c.name,
-            status: c.status,
-            campaignTp: c.type
-          }));
-          allCampaignIds = campaigns.map(c => c.nccCampaignId);
+        try {
+          // Always fetch campaigns from Naver API to keep types updated
+          const apiCampaigns = await makeNaverRequest('/ncc/campaigns', 'GET', customerId, undefined, customKeys);
+          if (Array.isArray(apiCampaigns) && apiCampaigns.length > 0) {
+            campaigns = apiCampaigns.map(c => ({
+              nccCampaignId: c.nccCampaignId,
+              name: c.name,
+              status: c.status,
+              campaignTp: c.campaignTp
+            }));
+            allCampaignIds = campaigns.map(c => c.nccCampaignId);
 
+            // Update campaigns table in DB with the API campaigns (updates types)
+            const campaignRows = apiCampaigns.map(camp => ({
+              ncc_campaign_id: camp.nccCampaignId,
+              customer_id: customerIdInt,
+              name: camp.name,
+              status: camp.status,
+              type: camp.campaignTp
+            }));
+            await supabaseAdmin.from('campaigns').upsert(campaignRows);
+            console.log(`[Background Sync] Refreshed campaign types from Naver API: ${campaigns.length} campaigns`);
+          }
+        } catch (err: any) {
+          console.error(`[Background Sync] Failed to refresh campaigns from Naver API, falling back to DB:`, err.message);
+        }
+
+        // If API campaigns fetch failed or returned empty, fallback to DB campaigns
+        if (campaigns.length === 0) {
+          // Fetch campaigns from database
+          const { data: dbCampaigns, error: campErr } = await supabaseAdmin
+            .from('campaigns')
+            .select('ncc_campaign_id, name, status, type')
+            .eq('customer_id', customerIdInt);
+          
+          if (campErr || !dbCampaigns || dbCampaigns.length === 0) {
+            console.log(`[Background Sync] No existing campaigns in database for customer ${customerId}. Falling back to full hierarchy sync.`);
+            runFullHierarchySync = true;
+          } else {
+            campaigns = dbCampaigns.map(c => ({
+              nccCampaignId: c.ncc_campaign_id,
+              name: c.name,
+              status: c.status,
+              campaignTp: c.type
+            }));
+            allCampaignIds = campaigns.map(c => c.nccCampaignId);
+          }
+        }
+
+        if (campaigns.length > 0 && !runFullHierarchySync) {
           // Fetch existing adgroups
           const { data: dbAdGroups, error: adgErr } = await supabaseAdmin
             .from('ad_groups')
