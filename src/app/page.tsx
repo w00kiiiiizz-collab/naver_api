@@ -355,7 +355,9 @@ export default function Home() {
     if (!userProfile || accounts.length === 0) return;
     setSyncingBizmoney(true);
     try {
-      const managerNo = userProfile.role === 'manager' ? userProfile.manager_account_no : '';
+      const managerNo = userProfile.role === 'manager' 
+        ? userProfile.manager_account_no 
+        : (selectedManagerFilter !== 'all' ? selectedManagerFilter : '');
       const response = await fetch(`/api/bizmoney/sync?managerAccountNo=${managerNo || ''}`);
       const resData = await response.json();
       if (resData.success) {
@@ -363,10 +365,15 @@ export default function Home() {
         let query = supabase.from('ad_accounts').select('*');
         if (userProfile.role === 'manager' && userProfile.manager_account_no) {
           query = query.eq('manager_account_no', userProfile.manager_account_no);
+        } else if (userProfile.role === 'admin' && selectedManagerFilter !== 'all') {
+          query = query.eq('manager_account_no', parseInt(selectedManagerFilter, 10));
         }
         const { data } = await query.order('ad_account_name');
         if (data) {
-          setAccounts(data);
+          setAccounts(prev => {
+            const accMap = new Map(data.map(a => [a.customer_id, a]));
+            return prev.map(oldAcc => accMap.get(oldAcc.customer_id) || oldAcc);
+          });
         }
       }
     } catch (e) {
@@ -390,12 +397,7 @@ export default function Home() {
     }
   }, [activeView, selectedAccount, startDate, endDate]);
 
-  // 2.8. Auto-sync bizmoney on first load once userProfile & accounts exist
-  useEffect(() => {
-    if (userProfile && accounts.length > 0) {
-      syncAllBizmoney();
-    }
-  }, [userProfile, accounts.length > 0]);
+  // Removed auto-sync bizmoney on first load to prevent 880-account loading freezes
 
   // Expand campaigns by default once data is loaded to make it easy for user
   useEffect(() => {
@@ -542,7 +544,7 @@ export default function Home() {
   const sortedKeywords = useMemo(() => getSortedData(keywordsData), [keywordsData, sortField, sortOrder]);
   const sortedShoppingQueries = useMemo(() => getSortedData(shoppingQueriesData), [shoppingQueriesData, sortField, sortOrder]);
 
-  // Aggregate stats by customer_id for all connected accounts
+  // Aggregate stats by customer_id for filtered accounts
   const allAccountsStats = useMemo(() => {
     const statsMap: Record<number | string, {
       imp_cnt: number;
@@ -557,7 +559,7 @@ export default function Home() {
     }> = {};
 
     // Initialize with empty stats
-    accounts.forEach(acc => {
+    filteredAccounts.forEach(acc => {
       statsMap[acc.customer_id] = {
         imp_cnt: 0,
         clk_cnt: 0,
@@ -588,16 +590,18 @@ export default function Home() {
     });
 
     // Compute derived rates
-    accounts.forEach(acc => {
+    filteredAccounts.forEach(acc => {
       const s = statsMap[acc.customer_id];
-      s.ctr = s.imp_cnt > 0 ? (s.clk_cnt / s.imp_cnt) * 100 : 0;
-      s.cpc = s.clk_cnt > 0 ? Math.round(s.sales_amt / s.clk_cnt) : 0;
-      s.purchase_ror = s.sales_amt > 0 ? (s.purchase_conv_amt / s.sales_amt) * 100 : 0;
-      s.cp_conv = s.purchase_ccnt > 0 ? Math.round(s.sales_amt / s.purchase_ccnt) : 0;
+      if (s) {
+        s.ctr = s.imp_cnt > 0 ? (s.clk_cnt / s.imp_cnt) * 100 : 0;
+        s.cpc = s.clk_cnt > 0 ? Math.round(s.sales_amt / s.clk_cnt) : 0;
+        s.purchase_ror = s.sales_amt > 0 ? (s.purchase_conv_amt / s.sales_amt) * 100 : 0;
+        s.cp_conv = s.purchase_ccnt > 0 ? Math.round(s.sales_amt / s.purchase_ccnt) : 0;
+      }
     });
 
     return statsMap;
-  }, [accounts, allCampaignsList, startDate, endDate]);
+  }, [filteredAccounts, allCampaignsList, startDate, endDate]);
 
   // Handle Overview Sorting
   const handleOverviewSort = (field: string) => {
@@ -641,7 +645,7 @@ export default function Home() {
     });
   }, [filteredAccounts, overviewSortField, overviewSortOrder, allAccountsStats]);
 
-  // Overall combined totals across all accounts
+  // Overall combined totals across filtered accounts
   const overallSummary = useMemo(() => {
     const totals = {
       imp_cnt: 0,
@@ -651,12 +655,15 @@ export default function Home() {
       purchase_conv_amt: 0
     };
 
-    Object.values(allAccountsStats).forEach(s => {
-      totals.imp_cnt += s.imp_cnt;
-      totals.clk_cnt += s.clk_cnt;
-      totals.sales_amt += s.sales_amt;
-      totals.purchase_ccnt += s.purchase_ccnt;
-      totals.purchase_conv_amt += s.purchase_conv_amt;
+    filteredAccounts.forEach(acc => {
+      const s = allAccountsStats[acc.customer_id];
+      if (s) {
+        totals.imp_cnt += s.imp_cnt;
+        totals.clk_cnt += s.clk_cnt;
+        totals.sales_amt += s.sales_amt;
+        totals.purchase_ccnt += s.purchase_ccnt;
+        totals.purchase_conv_amt += s.purchase_conv_amt;
+      }
     });
 
     const ctr = totals.imp_cnt > 0 ? (totals.clk_cnt / totals.imp_cnt) * 100 : 0;
