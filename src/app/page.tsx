@@ -678,7 +678,7 @@ export default function Home() {
       purchase_ror,
       cp_conv
     };
-  }, [allAccountsStats]);
+  }, [allAccountsStats, filteredAccounts]);
 
   // Overall account summary (summed from top-level campaigns)
   const summary = useMemo(() => {
