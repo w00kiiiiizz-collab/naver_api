@@ -227,6 +227,23 @@ export default function Home() {
     });
   }, [accounts, searchQuery, selectedManagerFilter]);
 
+  // Dynamically extract unique managers from the loaded accounts list
+  const dynamicManagers = useMemo(() => {
+    const map: Record<number | string, string> = {};
+    accounts.forEach(acc => {
+      if (acc.manager_account_no) {
+        map[acc.manager_account_no] = acc.manager_name || managerFallbackMap[acc.manager_account_no] || `매니저 ${acc.manager_account_no}`;
+      }
+    });
+    // Fill in default mapping fallback rules
+    Object.entries(managerFallbackMap).forEach(([no, name]) => {
+      if (!map[no]) {
+        map[no] = name;
+      }
+    });
+    return map;
+  }, [accounts]);
+
   // 2. Load overview stats for all accounts
   async function loadOverviewData() {
     if (accounts.length === 0) return;
@@ -1382,7 +1399,7 @@ export default function Home() {
                   <option value="all" className={theme === 'dark' ? 'bg-neutral-950 text-neutral-200' : 'bg-white text-neutral-800'}>
                     전체 보기
                   </option>
-                  {Object.entries(managerFallbackMap).map(([no, name]) => (
+                  {Object.entries(dynamicManagers).map(([no, name]) => (
                     <option key={no} value={no} className={theme === 'dark' ? 'bg-neutral-950 text-neutral-200' : 'bg-white text-neutral-800'}>
                       {name} ({no})
                     </option>
@@ -1672,7 +1689,7 @@ export default function Home() {
             <p className="text-[8.5px] text-neutral-500 font-semibold mt-0.5 uppercase tracking-wider">
               {userProfile?.role === 'admin' 
                 ? '관리자 (Admin)' 
-                : `담당: ${managerFallbackMap[userProfile?.manager_account_no] || '미배정'}`}
+                : `담당: ${dynamicManagers[userProfile?.manager_account_no] || '미배정'}`}
             </p>
           </div>
           
@@ -2451,7 +2468,7 @@ export default function Home() {
                       <span className="text-neutral-400 text-[10px]">네이버 담당 번호 (매니저ID)</span>
                       <span className="font-mono font-semibold">
                         {userProfile?.manager_account_no 
-                          ? `${userProfile.manager_account_no} (${managerFallbackMap[userProfile.manager_account_no] || '지정'})`
+                          ? `${userProfile.manager_account_no} (${dynamicManagers[userProfile.manager_account_no] || '지정'})`
                           : '미지정 (전체 데이터 노출)'}
                       </span>
                     </div>
@@ -2533,7 +2550,7 @@ export default function Home() {
                               user={u}
                               theme={theme}
                               isOwnProfile={isOwnProfile}
-                              managerFallbackMap={managerFallbackMap}
+                              managerFallbackMap={dynamicManagers}
                               onSave={handleUpdateProfile}
                             />
                           );
