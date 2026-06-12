@@ -484,7 +484,7 @@ export async function GET(request: Request) {
 
           for (const line of lines) {
             const cols = line.split('\t');
-            if (cols.length < 15) continue;
+            if (cols.length < 16) continue;
 
             const rawDate = cols[0];
             if (rawDate.length !== 8) continue;
@@ -503,6 +503,7 @@ export async function GET(request: Request) {
             const imp = parseInt(cols[11], 10) || 0;
             const clk = parseInt(cols[12], 10) || 0;
             const cost = parseInt(cols[13], 10) || 0;
+            const purchaseCcnt = parseInt(cols[15], 10) || 0;
 
             const queryKey = `${adId}::${query}`;
             if (!queryMap.has(queryKey)) {
@@ -523,7 +524,8 @@ export async function GET(request: Request) {
                 stat_date: formattedDate,
                 imp_cnt: 0,
                 clk_cnt: 0,
-                sales_amt: 0
+                sales_amt: 0,
+                purchase_ccnt: 0
               });
             }
 
@@ -531,6 +533,7 @@ export async function GET(request: Request) {
             stat.imp_cnt += imp;
             stat.clk_cnt += clk;
             stat.sales_amt += cost;
+            stat.purchase_ccnt += purchaseCcnt;
           }
 
           // 6. Upsert Queries
@@ -548,6 +551,7 @@ export async function GET(request: Request) {
           const statsToUpsert = Array.from(statMap.values()).map(stat => {
             const ctr = stat.imp_cnt > 0 ? (stat.clk_cnt / stat.imp_cnt) * 100 : 0;
             const cpc = stat.clk_cnt > 0 ? Math.round(stat.sales_amt / stat.clk_cnt) : 0;
+            const cpConv = stat.purchase_ccnt > 0 ? Math.round(stat.sales_amt / stat.purchase_ccnt) : 0;
             return {
               ncc_ad_id: stat.ncc_ad_id,
               query: stat.query,
@@ -557,10 +561,10 @@ export async function GET(request: Request) {
               ctr: ctr,
               cpc: cpc,
               sales_amt: stat.sales_amt,
-              purchase_ccnt: 0,
+              purchase_ccnt: stat.purchase_ccnt,
               purchase_conv_amt: 0,
               purchase_ror: 0,
-              cp_conv: 0
+              cp_conv: cpConv
             };
           });
 

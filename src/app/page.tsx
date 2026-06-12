@@ -105,6 +105,7 @@ export default function Home() {
   const [ownSecretKey, setOwnSecretKey] = useState('');
   const [ownCustomerId, setOwnCustomerId] = useState('');
   const [savingOwnKeys, setSavingOwnKeys] = useState(false);
+  const [selectedManagerFilter, setSelectedManagerFilter] = useState<string>('all');
 
   const [accounts, setAccounts] = useState<any[]>([]);
   const [selectedAccount, setSelectedAccount] = useState<any | null>(null);
@@ -215,10 +216,16 @@ export default function Home() {
     loadAccounts();
   }, [userProfile]);
 
-  // Filter accounts by search query
+  // Filter accounts by search query and manager filter
   const filteredAccounts = useMemo(() => {
-    return accounts.filter(acc => acc.ad_account_name.toLowerCase().includes(searchQuery.toLowerCase()));
-  }, [accounts, searchQuery]);
+    return accounts.filter(acc => {
+      const matchesSearch = acc.ad_account_name.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchesManager = selectedManagerFilter === 'all' 
+        ? true 
+        : acc.manager_account_no?.toString() === selectedManagerFilter;
+      return matchesSearch && matchesManager;
+    });
+  }, [accounts, searchQuery, selectedManagerFilter]);
 
   // 2. Load overview stats for all accounts
   async function loadOverviewData() {
@@ -858,6 +865,204 @@ export default function Home() {
     }
   }
 
+  // CSV/Excel Download Helper Function
+  const downloadCSV = (filename: string, headers: string[], rows: any[][]) => {
+    const BOM = '\uFEFF';
+    const csvContent = [
+      headers.join(','),
+      ...rows.map(row => 
+        row.map(val => {
+          let strVal = val === null || val === undefined ? '' : String(val);
+          if (strVal.includes(',') || strVal.includes('\n') || strVal.includes('"')) {
+            strVal = `"${strVal.replace(/"/g, '""')}"`;
+          }
+          return strVal;
+        }).join(',')
+      )
+    ].join('\n');
+
+    const blob = new Blob([BOM + csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', filename);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // Export Summary Table to CSV
+  const handleExportOverview = () => {
+    const headers = [
+      '광고주 계정',
+      '고객 ID',
+      '담당자',
+      '비즈머니 잔액',
+      '노출수',
+      '클릭수',
+      '클릭률',
+      '평균CPC',
+      '총비용',
+      '전환수',
+      '전환매출액',
+      'ROAS',
+      '전환당비용'
+    ];
+
+    const rows = sortedOverviewAccounts.map(acc => {
+      const s = allAccountsStats[acc.customer_id] || {
+        imp_cnt: 0, clk_cnt: 0, sales_amt: 0, purchase_ccnt: 0, purchase_conv_amt: 0,
+        ctr: 0, cpc: 0, purchase_ror: 0, cp_conv: 0
+      };
+      const managerName = acc.manager_name || managerFallbackMap[acc.manager_account_no] || '미지정';
+      return [
+        acc.ad_account_name,
+        acc.customer_id,
+        managerName,
+        acc.bizmoney || 0,
+        s.imp_cnt,
+        s.clk_cnt,
+        `${s.ctr.toFixed(2)}%`,
+        s.cpc,
+        s.sales_amt,
+        s.purchase_ccnt,
+        s.purchase_conv_amt,
+        `${s.purchase_ror.toFixed(2)}%`,
+        s.cp_conv
+      ];
+    });
+
+    const dateSuffix = `${startDate}_to_${endDate}`;
+    downloadCSV(`advertiser_summary_${dateSuffix}.csv`, headers, rows);
+  };
+
+  // Export Detailed Tree Statistics to Flat CSV
+  const handleExportDetail = () => {
+    if (!selectedAccount) return;
+    const headers = [
+      '구분',
+      '캠페인명',
+      '광고그룹명',
+      '소재/키워드/검색어명',
+      '상태',
+      '노출수',
+      '클릭수',
+      '클릭률',
+      '평균CPC',
+      '총비용',
+      '전환수',
+      '전환매출액',
+      'ROAS',
+      '전환당비용'
+    ];
+
+    const rows: any[][] = [];
+
+    sortedCampaigns.forEach(camp => {
+      rows.push([
+        '캠페인',
+        camp.name,
+        '-',
+        '-',
+        camp.status === 'ELIGIBLE' ? '활성' : '중지',
+        camp.imp_cnt || 0,
+        camp.clk_cnt || 0,
+        `${(camp.ctr || 0).toFixed(2)}%`,
+        camp.cpc || 0,
+        camp.sales_amt || 0,
+        camp.purchase_ccnt || 0,
+        camp.purchase_conv_amt || 0,
+        `${(camp.purchase_ror || 0).toFixed(2)}%`,
+        camp.cp_conv || 0
+      ]);
+
+      const childAdgs = sortedAdgroups.filter(ag => ag.ncc_campaign_id === camp.ncc_campaign_id);
+      childAdgs.forEach(adg => {
+        rows.push([
+          '광고그룹',
+          camp.name,
+          adg.name,
+          '-',
+          adg.status === 'ELIGIBLE' ? '활성' : '중지',
+          adg.imp_cnt || 0,
+          adg.clk_cnt || 0,
+          `${(adg.ctr || 0).toFixed(2)}%`,
+          adg.cpc || 0,
+          adg.sales_amt || 0,
+          adg.purchase_ccnt || 0,
+          adg.purchase_conv_amt || 0,
+          `${(adg.purchase_ror || 0).toFixed(2)}%`,
+          adg.cp_conv || 0
+        ]);
+
+        const childAds = sortedAds.filter(ad => ad.ncc_adgroup_id === adg.ncc_adgroup_id);
+        childAds.forEach(ad => {
+          rows.push([
+            '광고소재',
+            camp.name,
+            adg.name,
+            ad.name || ad.ncc_ad_id,
+            ad.status === 'ELIGIBLE' ? '활성' : '중지',
+            ad.imp_cnt || 0,
+            ad.clk_cnt || 0,
+            `${(ad.ctr || 0).toFixed(2)}%`,
+            ad.cpc || 0,
+            ad.sales_amt || 0,
+            ad.purchase_ccnt || 0,
+            ad.purchase_conv_amt || 0,
+            `${(ad.purchase_ror || 0).toFixed(2)}%`,
+            ad.cp_conv || 0
+          ]);
+
+          const childQueries = sortedShoppingQueries.filter(q => q.ncc_ad_id === ad.ncc_ad_id);
+          childQueries.forEach(q => {
+            rows.push([
+              '쇼핑검색어',
+              camp.name,
+              adg.name,
+              q.query,
+              '-',
+              q.imp_cnt || 0,
+              q.clk_cnt || 0,
+              `${(q.ctr || 0).toFixed(2)}%`,
+              q.cpc || 0,
+              q.sales_amt || 0,
+              q.purchase_ccnt || 0,
+              q.purchase_conv_amt || 0,
+              `${(q.purchase_ror || 0).toFixed(2)}%`,
+              q.cp_conv || 0
+            ]);
+          });
+        });
+
+        const childKeywords = sortedKeywords.filter(kw => kw.ncc_adgroup_id === adg.ncc_adgroup_id);
+        childKeywords.forEach(kw => {
+          rows.push([
+            '키워드',
+            camp.name,
+            adg.name,
+            kw.keyword,
+            kw.status === 'ELIGIBLE' ? '활성' : '중지',
+            kw.imp_cnt || 0,
+            kw.clk_cnt || 0,
+            `${(kw.ctr || 0).toFixed(2)}%`,
+            kw.cpc || 0,
+            kw.sales_amt || 0,
+            kw.purchase_ccnt || 0,
+            kw.purchase_conv_amt || 0,
+            `${(kw.purchase_ror || 0).toFixed(2)}%`,
+            kw.cp_conv || 0
+          ]);
+        });
+      });
+    });
+
+    const dateSuffix = `${startDate}_to_${endDate}`;
+    const sanitizedAccName = selectedAccount.ad_account_name.replace(/[^a-zA-Z0-9가-힣_]/g, '_');
+    downloadCSV(`${sanitizedAccName}_detail_${dateSuffix}.csv`, headers, rows);
+  };
+
   // 7.5. Profile settings & Logout & Admin User Management
   const handleLogout = async () => {
     await supabase.auth.signOut();
@@ -1156,6 +1361,29 @@ export default function Home() {
               />
             </div>
 
+            {/* Manager Filter for Admin */}
+            {userProfile?.role === 'admin' && (
+              <div className={`flex items-center rounded-lg px-2 py-1.5 border text-[10px] ${
+                theme === 'dark' ? 'bg-neutral-950 border-neutral-800 text-neutral-300' : 'bg-white border-gray-200 text-neutral-700'
+              }`}>
+                <span className="mr-1.5 font-bold text-[9px] text-neutral-500">담당자:</span>
+                <select
+                  value={selectedManagerFilter}
+                  onChange={(e) => setSelectedManagerFilter(e.target.value)}
+                  className="bg-transparent border-none outline-none cursor-pointer focus:ring-0 p-0 text-[10px] font-semibold font-sans [color-scheme:dark]"
+                >
+                  <option value="all" className={theme === 'dark' ? 'bg-neutral-950 text-neutral-200' : 'bg-white text-neutral-800'}>
+                    전체 보기
+                  </option>
+                  {Object.entries(managerFallbackMap).map(([no, name]) => (
+                    <option key={no} value={no} className={theme === 'dark' ? 'bg-neutral-950 text-neutral-200' : 'bg-white text-neutral-800'}>
+                      {name} ({no})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
             {/* Bizmoney Sync Button */}
             <button 
               onClick={syncAllBizmoney}
@@ -1164,6 +1392,19 @@ export default function Home() {
             >
               <RefreshCw size={10} className={syncingBizmoney ? "animate-spin" : ""} />
               {syncingBizmoney ? '잔액 갱신 중...' : '비즈머니 잔액 갱신'}
+            </button>
+
+            {/* Export Summary Table to CSV */}
+            <button
+              onClick={handleExportOverview}
+              className={`flex items-center gap-1.5 px-3 py-1.5 border font-bold rounded-lg shadow-md transition-all text-[10px] cursor-pointer ${
+                theme === 'dark' 
+                  ? 'bg-neutral-950 border-neutral-800 hover:bg-neutral-900 text-neutral-300 hover:text-white' 
+                  : 'bg-white border-gray-200 hover:bg-gray-50 text-neutral-700 hover:text-neutral-900'
+              }`}
+            >
+              <DollarSign size={10} />
+              엑셀/CSV 다운로드
             </button>
 
             {/* Theme Toggle Button */}
@@ -1496,11 +1737,22 @@ export default function Home() {
                       onClick={() => setActiveView('overview')}
                       className={`px-2.5 py-1 rounded-lg border text-[9px] font-bold transition-all cursor-pointer hover:shadow flex items-center gap-1 ${
                         theme === 'dark' 
-                          ? 'bg-neutral-950 border-neutral-850 hover:bg-neutral-900 text-neutral-300' 
+                          ? 'bg-neutral-950 border-neutral-855 hover:bg-neutral-900 text-neutral-300' 
                           : 'bg-white border-gray-200 hover:bg-gray-50 text-neutral-700'
                       }`}
                     >
                       <span>⬅️ 전체 목록</span>
+                    </button>
+                    <button
+                      onClick={handleExportDetail}
+                      className={`px-2.5 py-1 rounded-lg border text-[9px] font-bold transition-all cursor-pointer hover:shadow flex items-center gap-1 ${
+                        theme === 'dark' 
+                          ? 'bg-neutral-950 border-neutral-855 hover:bg-neutral-900 text-neutral-300 hover:text-white' 
+                          : 'bg-white border-gray-200 hover:bg-gray-50 text-neutral-700 hover:text-neutral-900'
+                      }`}
+                    >
+                      <DollarSign size={9} />
+                      엑셀/CSV 다운로드
                     </button>
                     <h1 className={`text-xl font-bold tracking-tight ${theme === 'dark' ? 'text-white' : 'text-neutral-900'}`}>
                       {selectedAccount ? selectedAccount.ad_account_name : '광고주를 선택해주세요'}
