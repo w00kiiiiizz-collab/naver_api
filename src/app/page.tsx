@@ -828,20 +828,41 @@ export default function Home() {
 
   const handleUpdateProfile = async (id: string, updatedRole: string, updatedManagerNo: number | string) => {
     const managerNoVal = updatedManagerNo === '' || updatedManagerNo === 'none' ? null : parseInt(updatedManagerNo.toString(), 10);
-    const { error } = await supabase
-      .from('user_profiles')
-      .update({ role: updatedRole, manager_account_no: managerNoVal })
-      .eq('id', id);
     
-    if (error) {
-      alert('설정 저장 실패: ' + error.message);
-    } else {
+    // Get the current session to extract the access token
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) {
+      alert('세션이 만료되었습니다. 다시 로그인해 주세요.');
+      return;
+    }
+
+    try {
+      const response = await fetch('/api/admin/users', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session.access_token}`
+        },
+        body: JSON.stringify({
+          userId: id,
+          role: updatedRole,
+          managerAccountNo: managerNoVal
+        })
+      });
+
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.error || '알 수 없는 오류가 발생했습니다.');
+      }
+
       alert('설정이 성공적으로 저장되었습니다.');
       loadProfilesList();
       // If updating current user's profile, update the local userProfile state too
       if (id === userProfile.id) {
         setUserProfile((prev: any) => ({ ...prev, role: updatedRole, manager_account_no: managerNoVal }));
       }
+    } catch (err: any) {
+      alert('설정 저장 실패: ' + err.message);
     }
   };
 
