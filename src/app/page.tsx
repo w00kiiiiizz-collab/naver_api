@@ -100,6 +100,12 @@ export default function Home() {
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [profilesList, setProfilesList] = useState<any[]>([]);
 
+  // Local state for editing current user's own Naver API keys in modal
+  const [ownApiKey, setOwnApiKey] = useState('');
+  const [ownSecretKey, setOwnSecretKey] = useState('');
+  const [ownCustomerId, setOwnCustomerId] = useState('');
+  const [savingOwnKeys, setSavingOwnKeys] = useState(false);
+
   const [accounts, setAccounts] = useState<any[]>([]);
   const [selectedAccount, setSelectedAccount] = useState<any | null>(null);
   
@@ -867,8 +873,13 @@ export default function Home() {
   };
 
   useEffect(() => {
-    if (showSettingsModal && userProfile?.role === 'admin') {
-      loadProfilesList();
+    if (showSettingsModal) {
+      if (userProfile?.role === 'admin') {
+        loadProfilesList();
+      }
+      setOwnApiKey(userProfile?.naver_api_key || '');
+      setOwnSecretKey(userProfile?.naver_secret_key || '');
+      setOwnCustomerId(userProfile?.naver_customer_id ? userProfile.naver_customer_id.toString() : '');
     }
   }, [showSettingsModal, userProfile]);
 
@@ -909,6 +920,35 @@ export default function Home() {
       }
     } catch (err: any) {
       alert('설정 저장 실패: ' + err.message);
+    }
+  };
+
+  const handleUpdateOwnApiKeys = async () => {
+    if (!userProfile) return;
+    setSavingOwnKeys(true);
+    try {
+      const { error } = await supabase
+        .from('user_profiles')
+        .update({
+          naver_api_key: ownApiKey === '' ? null : ownApiKey,
+          naver_secret_key: ownSecretKey === '' ? null : ownSecretKey,
+          naver_customer_id: ownCustomerId === '' ? null : parseInt(ownCustomerId, 10)
+        })
+        .eq('id', userProfile.id);
+
+      if (error) throw error;
+
+      alert('네이버 API 연동 키가 성공적으로 업데이트되었습니다.');
+      setUserProfile((prev: any) => ({
+        ...prev,
+        naver_api_key: ownApiKey === '' ? null : ownApiKey,
+        naver_secret_key: ownSecretKey === '' ? null : ownSecretKey,
+        naver_customer_id: ownCustomerId === '' ? null : parseInt(ownCustomerId, 10)
+      }));
+    } catch (err: any) {
+      alert('API 키 업데이트 실패: ' + err.message);
+    } finally {
+      setSavingOwnKeys(false);
     }
   };
 
@@ -1358,12 +1398,15 @@ export default function Home() {
                 )}
                 <Users size={12} className={`flex-shrink-0 ${isSelected ? "text-blue-500" : "text-neutral-500"}`} />
                 <div className="min-w-0 flex-1 flex flex-col text-left">
-                  <span className="truncate w-full">{acc.ad_account_name}</span>
-                  <span className={`text-[8.5px] mt-0.5 font-normal truncate ${
-                    isSelected ? 'text-blue-400/80' : 'text-neutral-500'
-                  }`}>
-                    담당자: {acc.manager_name || managerFallbackMap[acc.manager_account_no] || '미지정'}
-                  </span>
+                  <span className="truncate w-full font-bold">{acc.ad_account_name}</span>
+                  <div className="flex items-center justify-between text-[8px] mt-0.5 font-normal">
+                    <span className={isSelected ? 'text-blue-400/80' : 'text-neutral-500'}>
+                      ID: {acc.customer_id}
+                    </span>
+                    <span className={isSelected ? 'text-blue-400/80' : 'text-neutral-500'}>
+                      담당: {acc.manager_name || managerFallbackMap[acc.manager_account_no] || '미지정'}
+                    </span>
+                  </div>
                 </div>
               </button>
             );
@@ -2125,32 +2168,79 @@ export default function Home() {
             <div className="p-6 overflow-y-auto space-y-6 custom-scrollbar text-xs">
               
               {/* User Self Info */}
-              <div className="space-y-3">
-                <h4 className="font-bold text-[11px] text-neutral-400 uppercase tracking-wider">내 계정 정보</h4>
-                <div className={`p-4 rounded-xl border space-y-2.5 ${
+              <div className="space-y-4">
+                <h4 className="font-bold text-[11px] text-neutral-400 uppercase tracking-wider">내 계정 정보 및 네이버 API 연동 키 수정</h4>
+                <div className={`p-4 rounded-xl border space-y-4 ${
                   theme === 'dark' ? 'bg-neutral-900/40 border-neutral-900' : 'bg-gray-50/50 border-gray-150'
                 }`}>
-                  <div className="flex justify-between items-center">
-                    <span className="text-neutral-400">이메일 주소:</span>
-                    <span className="font-semibold">{userProfile?.email}</span>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div className="flex flex-col gap-1">
+                      <span className="text-neutral-400 text-[10px]">이메일 주소</span>
+                      <span className="font-semibold">{userProfile?.email}</span>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <span className="text-neutral-400 text-[10px]">계정 역할</span>
+                      <span className="font-semibold uppercase text-blue-500">
+                        {userProfile?.role === 'admin' 
+                          ? '관리자 (Admin)' 
+                          : userProfile?.role === 'pending'
+                            ? '승인 대기 (Pending)'
+                            : '일반 담당자 (Manager)'}
+                      </span>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <span className="text-neutral-400 text-[10px]">네이버 담당 번호 (매니저ID)</span>
+                      <span className="font-mono font-semibold">
+                        {userProfile?.manager_account_no 
+                          ? `${userProfile.manager_account_no} (${managerFallbackMap[userProfile.manager_account_no] || '지정'})`
+                          : '미지정 (전체 데이터 노출)'}
+                      </span>
+                    </div>
                   </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-neutral-400">계정 역할:</span>
-                    <span className="font-semibold uppercase text-blue-500">
-                      {userProfile?.role === 'admin' 
-                        ? '관리자 (Admin)' 
-                        : userProfile?.role === 'pending'
-                          ? '승인 대기 (Pending)'
-                          : '일반 담당자 (Manager)'}
-                    </span>
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-neutral-400">지정된 네이버 담당 번호:</span>
-                    <span className="font-mono font-semibold">
-                      {userProfile?.manager_account_no 
-                        ? `${userProfile.manager_account_no} (${managerFallbackMap[userProfile.manager_account_no]})`
-                        : '미지정 (전체 광고주가 노출됨)'}
-                    </span>
+
+                  <div className="border-t border-neutral-900/40 my-3 pt-3 space-y-3">
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      <div className="flex flex-col gap-1">
+                        <label className="text-neutral-400 text-[10px] font-bold">네이버 API Key</label>
+                        <input
+                          type="text"
+                          value={ownApiKey}
+                          onChange={(e) => setOwnApiKey(e.target.value)}
+                          placeholder="0100000000..."
+                          className="px-2.5 py-1.5 rounded-lg border bg-neutral-900 text-neutral-200 border-neutral-800 text-[10px] outline-none"
+                        />
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        <label className="text-neutral-400 text-[10px] font-bold">네이버 Secret Key</label>
+                        <input
+                          type="password"
+                          value={ownSecretKey}
+                          onChange={(e) => setOwnSecretKey(e.target.value)}
+                          placeholder="AQAAAAB..."
+                          className="px-2.5 py-1.5 rounded-lg border bg-neutral-900 text-neutral-200 border-neutral-800 text-[10px] outline-none"
+                        />
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        <label className="text-neutral-400 text-[10px] font-bold">네이버 고객 ID (Customer ID)</label>
+                        <input
+                          type="text"
+                          value={ownCustomerId}
+                          onChange={(e) => setOwnCustomerId(e.target.value)}
+                          placeholder="고객 ID 입력"
+                          className="px-2.5 py-1.5 rounded-lg border bg-neutral-900 text-neutral-200 border-neutral-800 text-[10px] outline-none font-mono"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex justify-end pt-1">
+                      <button
+                        onClick={handleUpdateOwnApiKeys}
+                        disabled={savingOwnKeys}
+                        className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-800 text-white font-bold rounded-lg text-[10px] shadow transition-all cursor-pointer"
+                      >
+                        {savingOwnKeys ? '저장 중...' : '네이버 API 정보 저장'}
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>

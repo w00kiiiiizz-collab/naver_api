@@ -33,7 +33,7 @@ export async function GET(request: Request) {
   const managerAccountNo = searchParams.get('managerAccountNo');
 
   try {
-    let query = supabaseAdmin.from('ad_accounts').select('customer_id, ad_account_name');
+    let query = supabaseAdmin.from('ad_accounts').select('customer_id, ad_account_name, manager_account_no');
     if (managerAccountNo && managerAccountNo !== 'null' && managerAccountNo !== 'undefined' && managerAccountNo !== '') {
       query = query.eq('manager_account_no', parseInt(managerAccountNo, 10));
     }
@@ -48,19 +48,21 @@ export async function GET(request: Request) {
     const results = await mapConcurrent(accounts, 5, 60, async (acc) => {
       const custId = acc.customer_id.toString();
       try {
-        // Find credentials
+        // Find credentials matching the manager_account_no
         let customKeys: { apiKey: string; secretKey: string } | undefined;
-        const { data: profile } = await supabaseAdmin
-          .from('user_profiles')
-          .select('naver_api_key, naver_secret_key')
-          .eq('naver_customer_id', acc.customer_id)
-          .maybeSingle();
+        if (acc.manager_account_no) {
+          const { data: profile } = await supabaseAdmin
+            .from('user_profiles')
+            .select('naver_api_key, naver_secret_key')
+            .eq('manager_account_no', acc.manager_account_no)
+            .maybeSingle();
 
-        if (profile && profile.naver_api_key && profile.naver_secret_key) {
-          customKeys = {
-            apiKey: profile.naver_api_key,
-            secretKey: profile.naver_secret_key
-          };
+          if (profile && profile.naver_api_key && profile.naver_secret_key) {
+            customKeys = {
+              apiKey: profile.naver_api_key,
+              secretKey: profile.naver_secret_key
+            };
+          }
         }
 
         const res = await makeNaverRequest('/billing/bizmoney', 'GET', custId, undefined, customKeys);
