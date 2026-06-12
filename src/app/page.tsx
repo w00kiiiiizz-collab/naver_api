@@ -227,22 +227,35 @@ export default function Home() {
     });
   }, [accounts, searchQuery, selectedManagerFilter]);
 
-  // Dynamically extract unique managers from the loaded accounts list
+  // Dynamically extract unique managers from accounts list AND active user profiles list
   const dynamicManagers = useMemo(() => {
     const map: Record<number | string, string> = {};
+    
+    // 1. Extract from loaded accounts (contains manager name from Naver API)
     accounts.forEach(acc => {
       if (acc.manager_account_no) {
         map[acc.manager_account_no] = acc.manager_name || managerFallbackMap[acc.manager_account_no] || `매니저 ${acc.manager_account_no}`;
       }
     });
-    // Fill in default mapping fallback rules
+
+    // 2. Extract from active profiles (contains manager ID for users who registered but have no stats yet)
+    profilesList.forEach(p => {
+      if (p.manager_account_no) {
+        const emailPrefix = p.email.split('@')[0];
+        if (!map[p.manager_account_no]) {
+          map[p.manager_account_no] = `${emailPrefix} (신규가입)`;
+        }
+      }
+    });
+
+    // 3. Fill in default mapping fallback rules
     Object.entries(managerFallbackMap).forEach(([no, name]) => {
       if (!map[no]) {
         map[no] = name;
       }
     });
     return map;
-  }, [accounts]);
+  }, [accounts, profilesList]);
 
   // 2. Load overview stats for all accounts
   async function loadOverviewData() {
