@@ -128,10 +128,10 @@ export default function Home() {
   const [theme, setTheme] = useState<'light' | 'dark'>('dark');
 
   // Selected date preset code
-  const [selectedPreset, setSelectedPreset] = useState<string>('7days');
+  const [selectedPreset, setSelectedPreset] = useState<string>('yesterday');
   
-  // Date Range Selection (Default to last 7 days)
-  const [startDate, setStartDate] = useState(format(subDays(new Date(), 7), 'yyyy-MM-dd'));
+  // Date Range Selection (Default to yesterday)
+  const [startDate, setStartDate] = useState(format(subDays(new Date(), 1), 'yyyy-MM-dd'));
   const [endDate, setEndDate] = useState(format(subDays(new Date(), 1), 'yyyy-MM-dd'));
 
   // Table expansion state
@@ -142,6 +142,10 @@ export default function Home() {
   // Tree Table Sorting State
   const [sortField, setSortField] = useState<string | null>(null);
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
+
+  // Overview Table Sorting State (Default to sales_amt / desc)
+  const [overviewSortField, setOverviewSortField] = useState<string | null>('sales_amt');
+  const [overviewSortOrder, setOverviewSortOrder] = useState<'asc' | 'desc'>('desc');
 
   // Summary Card selected metrics
   const [card1Metric, setCard1Metric] = useState<string>('imp_cnt');
@@ -582,6 +586,48 @@ export default function Home() {
     return statsMap;
   }, [accounts, allCampaignsList, startDate, endDate]);
 
+  // Handle Overview Sorting
+  const handleOverviewSort = (field: string) => {
+    if (overviewSortField === field) {
+      setOverviewSortOrder(prev => (prev === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setOverviewSortField(field);
+      setOverviewSortOrder('desc'); // Default to descending order on first click
+    }
+  };
+
+  const sortedOverviewAccounts = useMemo(() => {
+    if (!overviewSortField) return filteredAccounts;
+
+    return [...filteredAccounts].sort((a, b) => {
+      let valA: any = 0;
+      let valB: any = 0;
+
+      if (overviewSortField === 'ad_account_name') {
+        valA = a.ad_account_name;
+        valB = b.ad_account_name;
+        
+        if (overviewSortOrder === 'asc') {
+          return valA.localeCompare(valB, 'ko');
+        } else {
+          return valB.localeCompare(valA, 'ko');
+        }
+      } else if (overviewSortField === 'bizmoney') {
+        valA = a.bizmoney || 0;
+        valB = b.bizmoney || 0;
+      } else {
+        const statsA = allAccountsStats[a.customer_id];
+        const statsB = allAccountsStats[b.customer_id];
+        valA = statsA ? (statsA[overviewSortField as keyof typeof statsA] || 0) : 0;
+        valB = statsB ? (statsB[overviewSortField as keyof typeof statsB] || 0) : 0;
+      }
+
+      if (valA < valB) return overviewSortOrder === 'asc' ? -1 : 1;
+      if (valA > valB) return overviewSortOrder === 'asc' ? 1 : -1;
+      return 0;
+    });
+  }, [filteredAccounts, overviewSortField, overviewSortOrder, allAccountsStats]);
+
   // Overall combined totals across all accounts
   const overallSummary = useMemo(() => {
     const totals = {
@@ -978,6 +1024,23 @@ export default function Home() {
   }
 
   const renderOverview = () => {
+    const SortableOverviewHeader = ({ field, label, widthClass, textRight }: { field: string, label: string, widthClass: string, textRight?: boolean }) => {
+      const isSorted = overviewSortField === field;
+      return (
+        <th 
+          onClick={() => handleOverviewSort(field)}
+          className={`px-2 py-3 hover:bg-neutral-800/50 hover:text-white cursor-pointer select-none transition-colors border-r border-neutral-900/10 ${widthClass} ${textRight ? 'text-right' : ''}`}
+        >
+          <div className={`flex items-center gap-1 whitespace-nowrap ${textRight ? 'justify-end' : ''}`}>
+            <span>{label}</span>
+            <span className="text-[9px] text-neutral-500">
+              {isSorted ? (overviewSortOrder === 'asc' ? '▲' : '▼') : <ChevronsUpDown size={9} />}
+            </span>
+          </div>
+        </th>
+      );
+    };
+
     return (
       <div className="space-y-5">
         {/* Header Controls for Overview */}
@@ -1123,17 +1186,17 @@ export default function Home() {
                 <tr className={`border-b text-[10px] uppercase tracking-wider font-bold ${
                   theme === 'dark' ? 'bg-neutral-950 border-neutral-850 text-neutral-500' : 'bg-gray-100 border-gray-200 text-neutral-500'
                 }`}>
-                  <th className="px-3 py-3 text-left w-[18%] border-r border-neutral-900/10 whitespace-nowrap">광고주 계정</th>
-                  <th className="px-3 py-3 text-right w-[11%] border-r border-neutral-900/10 text-emerald-500 whitespace-nowrap">비즈머니 잔액</th>
-                  <th className="px-2 py-3 text-right w-[8%] border-r border-neutral-900/10 whitespace-nowrap">노출수</th>
-                  <th className="px-2 py-3 text-right w-[6%] border-r border-neutral-900/10 whitespace-nowrap">클릭수</th>
-                  <th className="px-2 py-3 text-right w-[6%] border-r border-neutral-900/10 whitespace-nowrap">클릭률</th>
-                  <th className="px-2 py-3 text-right w-[8%] border-r border-neutral-900/10 whitespace-nowrap">평균CPC</th>
-                  <th className="px-2 py-3 text-right w-[9%] border-r border-neutral-900/10 whitespace-nowrap">총비용</th>
-                  <th className="px-2 py-3 text-right w-[7%] border-r border-neutral-900/10 whitespace-nowrap">전환수</th>
-                  <th className="px-2 py-3 text-right w-[10%] border-r border-neutral-900/10 whitespace-nowrap">전환매출액</th>
-                  <th className="px-2 py-3 text-right w-[7%] border-r border-neutral-900/10 whitespace-nowrap">ROAS</th>
-                  <th className="px-2 py-3 text-right w-[10%] border-r border-neutral-900/10 whitespace-nowrap">전환당비용</th>
+                  <SortableOverviewHeader field="ad_account_name" label="광고주 계정" widthClass="w-[18%]" />
+                  <SortableOverviewHeader field="bizmoney" label="비즈머니 잔액" widthClass="w-[11%]" textRight />
+                  <SortableOverviewHeader field="imp_cnt" label="노출수" widthClass="w-[8%]" textRight />
+                  <SortableOverviewHeader field="clk_cnt" label="클릭수" widthClass="w-[6%]" textRight />
+                  <SortableOverviewHeader field="ctr" label="클릭률" widthClass="w-[6%]" textRight />
+                  <SortableOverviewHeader field="cpc" label="평균CPC" widthClass="w-[8%]" textRight />
+                  <SortableOverviewHeader field="sales_amt" label="총비용" widthClass="w-[9%]" textRight />
+                  <SortableOverviewHeader field="purchase_ccnt" label="전환수" widthClass="w-[7%]" textRight />
+                  <SortableOverviewHeader field="purchase_conv_amt" label="전환매출액" widthClass="w-[10%]" textRight />
+                  <SortableOverviewHeader field="purchase_ror" label="ROAS" widthClass="w-[7%]" textRight />
+                  <SortableOverviewHeader field="cp_conv" label="전환당비용" widthClass="w-[10%]" textRight />
                   <th className="px-2 py-3 text-center w-[5%] whitespace-nowrap">상세</th>
                 </tr>
               </thead>
@@ -1146,14 +1209,14 @@ export default function Home() {
                       계정 종합 요약 정보를 불러오는 중입니다...
                     </td>
                   </tr>
-                ) : filteredAccounts.length === 0 ? (
+                ) : sortedOverviewAccounts.length === 0 ? (
                   <tr>
                     <td colSpan={12} className="px-6 py-12 text-center text-neutral-500">
                       연동된 계정이 없습니다.
                     </td>
                   </tr>
                 ) : (
-                  filteredAccounts.map(acc => {
+                  sortedOverviewAccounts.map(acc => {
                     const s = allAccountsStats[acc.customer_id] || {
                       imp_cnt: 0, clk_cnt: 0, sales_amt: 0, purchase_ccnt: 0, purchase_conv_amt: 0,
                       ctr: 0, cpc: 0, purchase_ror: 0, cp_conv: 0
